@@ -36,7 +36,7 @@ cp -r "$PROJECT_ROOT/config/"* "$USB_DIR/config/"
 # Create launcher scripts
 echo "🚀 Creating launcher scripts..."
 
-# Linux launcher
+# Linux launcher (handles FAT32 permission issues)
 cat > "$USB_DIR/START-Linux.sh" << 'EOF'
 #!/bin/bash
 # Prima Distributed Local - Linux Launcher
@@ -63,10 +63,16 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-# Make executable
-chmod +x "$BINARY"
+# FAT32 USB drives don't preserve execute permissions
+# If not executable, copy to /tmp and run from there
+if [ ! -x "$BINARY" ]; then
+    echo "📦 USB permissions detected, preparing to run..."
+    TMP_BIN="/tmp/$(basename $BINARY)"
+    cp "$BINARY" "$TMP_BIN"
+    chmod +x "$TMP_BIN"
+    BINARY="$TMP_BIN"
+fi
 
-# Launch TUI
 echo "🔌 Starting Prima Distributed Local..."
 echo ""
 exec "$BINARY" tui
@@ -128,7 +134,7 @@ if errorlevel 1 (
 )
 EOF
 
-# Universal launcher (auto-detect)
+# Universal launcher (auto-detect, handles FAT32)
 cat > "$USB_DIR/START.sh" << 'EOF'
 #!/bin/bash
 # Prima Distributed Local - Universal Launcher
@@ -143,15 +149,16 @@ echo "🔌 Prima Distributed Local"
 echo "   Detected: $OS $ARCH"
 echo ""
 
+# Run appropriate launcher via bash (handles FAT32 permission issues)
 case "$OS" in
     Linux*)
-        exec ./START-Linux.sh
+        bash ./START-Linux.sh
         ;;
     Darwin*)
-        exec ./START-macOS.command
+        bash ./START-macOS.command
         ;;
     CYGWIN*|MINGW*|MSYS*)
-        exec ./START-Windows.bat
+        bash ./START-Windows.bat
         ;;
     *)
         echo "❌ Unsupported operating system: $OS"
@@ -171,14 +178,18 @@ QUICK START
 ───────────
 
 1. Plug USB into any PC
-2. Open USB folder
-3. Double-click the START file for your OS:
+2. Open USB folder in terminal
+3. Run:
 
-   • Windows:    START-Windows.bat
-   • macOS:      START-macOS.command
-   • Linux:      START-Linux.sh
+   bash START.sh    (any platform - auto-detects)
    
-   Or use:       START.sh (auto-detects)
+   Or specific:
+   bash START-Linux.sh
+   bash START-macOS.command
+   START-Windows.bat
+
+NOTE: USB drives formatted as FAT32 don't preserve Unix execute 
+permissions. All scripts auto-detect this and handle it.
 
 FIRST TIME SETUP
 ────────────────
@@ -206,16 +217,23 @@ ACCESS MODES
 FILES
 ─────
 
-├── START-*.sh/bat/command  → Launchers
-├── bin/                    → Binaries for all platforms
-├── config/                 → Configuration templates
-└── README.txt             → This file
+├── START.sh              ← Auto-detect (recommended)
+├── START-Linux.sh        ← Linux x64/ARM64
+├── START-macOS.command   ← macOS Intel/Apple
+├── START-Windows.bat     ← Windows
+├── bin/                  ← Binaries for all platforms
+│   ├── prima-installer-linux-x64
+│   ├── prima-installer-linux-arm64
+│   ├── prima-installer-macos-intel
+│   ├── prima-installer-macos-apple
+│   └── prima-installer-windows.exe
+├── config/               ← Configuration templates
+└── README.txt           ← This file
 
 SUPPORT
 ───────
 
 https://github.com/AR-Davis/prima_distributed_local
-
 EOF
 
 # Create .gitignore for USB folder
@@ -237,4 +255,4 @@ echo ""
 echo "Next steps:"
 echo "1. Copy $USB_DIR to a USB drive"
 echo "2. Plug into target PC"
-echo "3. Run START-* for that platform"
+echo "3. Run: bash START.sh"

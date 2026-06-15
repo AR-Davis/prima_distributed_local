@@ -1,0 +1,27 @@
+# Friend Group Configuration
+# For sharing resources with friends via secure pairing
+
+[cluster]
+name = "friend-cluster"
+head_node = ""  # Will be set during QR pairing
+access_model = "friend"
+# auth_token will be exchanged during pairing
+
+[node]
+tier = "auto"
+
+[node.resources]
+cpu_percent = 50
+memory_gb = 4
+gpu_layers = 0
+
+[node.schedule]
+enabled = true
+idle_detection = true
+idle_minutes = 5
+active_hours = "22:00-08:00"  # Only run at night by default
+
+[web_dashboard]
+enabled = true
+host = "127.0.0.1"
+port = 8080
