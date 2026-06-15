@@ -2,45 +2,46 @@
 package idle
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
-
-	"github.com/shirou/gopsutil/v4/cpu"
+	"unsafe"
 )
 
 // Detector interface for platform-specific idle detection
 type Detector interface {
-	// TimeSinceInput returns milliseconds since last user input
 	TimeSinceInput() (time.Duration, error)
-	// IsScreenLocked returns true if screen is locked
 	IsScreenLocked() (bool, error)
 }
 
 // State represents the current idle state
 type State struct {
-	IdleDuration    time.Duration `json:"idle_duration"`
-	IsScreenLocked  bool          `json:"is_screen_locked"`
-	CPULoadPercent  float64       `json:"cpu_load_percent"`
-	IsIdle          bool          `json:"is_idle"`
+	IdleDuration   time.Duration `json:"idle_duration"`
+	IsScreenLocked bool          `json:"is_screen_locked"`
+	IsIdle         bool          `json:"is_idle"`
 }
 
 // Monitor tracks idle state over time
 type Monitor struct {
-	threshold     time.Duration
-	cpuThreshold  float64
-	detector      Detector
-	state         State
-	lastCheck     time.Time
+	threshold    time.Duration
+	cpuThreshold float64
+	lastCheck    time.Time
 }
 
 // Config for idle monitoring
 type Config struct {
-	Enabled      bool          `toml:"enabled"`
-	Threshold    time.Duration `toml:"threshold"`     // Time before considered idle
-	CPUThreshold float64       `toml:"cpu_threshold"` // CPU % below which system is idle
-	CheckInterval time.Duration `toml:"check_interval"`
+	Enabled       bool
+	Threshold     time.Duration
+	CPUThreshold  float64
+	CheckInterval time.Duration
 }
 
 // DefaultConfig returns default idle detection config
@@ -55,16 +56,9 @@ func DefaultConfig() Config {
 
 // NewMonitor creates an idle state monitor
 func NewMonitor(cfg Config) (*Monitor, error) {
-	detector, err := newPlatformDetector()
-	if err != nil {
-		// Fall back to CPU-only detection
-		detector = &cpuDetector{}
-	}
-
 	return &Monitor{
 		threshold:    cfg.Threshold,
 		cpuThreshold: cfg.CPUThreshold,
-		detector:     detector,
 		lastCheck:    time.Now(),
 	}, nil
 }
@@ -73,28 +67,16 @@ func NewMonitor(cfg Config) (*Monitor, error) {
 func (m *Monitor) Check(ctx context.Context) (*State, error) {
 	state := &State{}
 
-	// Check input idle time
-	idleDuration, err := m.detector.TimeSinceInput()
-	if err != nil {
-		// Fall back to CPU detection only
-		idleDuration = 0
-	}
+	// Platform-specific idle detection
+	idleDuration, _ := getIdleTime()
 	state.IdleDuration = idleDuration
 
-	// Check screen lock
-	locked, _ := m.detector.IsScreenLocked()
+	locked, _ := isScreenLocked()
 	state.IsScreenLocked = locked
-
-	// Get CPU load
-	percentages, err := cpu.PercentWithContext(ctx, 0, false)
-	if err == nil && len(percentages) > 0 {
-		state.CPULoadPercent = percentages[0]
-	}
 
 	// Determine if idle
 	state.IsIdle = m.isIdle(state)
 
-	m.state = *state
 	m.lastCheck = time.Now()
 
 	return state, nil
@@ -102,7 +84,7 @@ func (m *Monitor) Check(ctx context.Context) (*State, error) {
 
 // IsIdle returns true if system is currently idle
 func (m *Monitor) IsIdle() bool {
-	return m.state.IsIdle
+	return m.isIdle(&State{IdleDuration: m.threshold + 1})
 }
 
 // WaitForIdle blocks until system becomes idle
@@ -149,50 +131,163 @@ func (m *Monitor) WaitForActive(ctx context.Context) error {
 
 // isIdle determines if system is idle based on current state
 func (m *Monitor) isIdle(state *State) bool {
-	// Input idle threshold
 	if state.IdleDuration >= m.threshold {
 		return true
 	}
-
-	// CPU-only detection (fallback)
-	if state.IdleDuration == 0 && state.CPULoadPercent < m.cpuThreshold {
-		// Require sustained low CPU for longer than input threshold
-		// This is handled by the caller checking repeatedly
+	if state.IsScreenLocked {
 		return true
 	}
-
-	// Screen locked counts as idle for middle tier
-	if state.IsScreenLocked && state.CPULoadPercent < m.cpuThreshold {
-		return true
-	}
-
 	return false
 }
 
-// cpuDetector is a fallback detector that only uses CPU
-type cpuDetector struct{}
-
-func (c *cpuDetector) TimeSinceInput() (time.Duration, error) {
-	return 0, fmt.Errorf("not implemented")
-}
-
-func (c *cpuDetector) IsScreenLocked() (bool, error) {
-	return false, fmt.Errorf("not implemented")
-}
-
-// Platform-specific implementations are in separate files
-// idle_linux.go, idle_darwin.go, idle_windows.go
-
-// newPlatformDetector creates the appropriate detector for the platform
-func newPlatformDetector() (Detector, error) {
+// getIdleTime returns idle time based on platform
+func getIdleTime() (time.Duration, error) {
 	switch runtime.GOOS {
 	case "linux":
-		return newLinuxDetector()
+		return getLinuxIdleTime()
 	case "darwin":
-		return newDarwinDetector()
+		return getDarwinIdleTime()
 	case "windows":
-		return newWindowsDetector()
+		return getWindowsIdleTime()
 	default:
-		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return 0, fmt.Errorf("unsupported platform")
 	}
+}
+
+// isScreenLocked returns screen lock status
+func isScreenLocked() (bool, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return isLinuxScreenLocked()
+	case "darwin":
+		return isDarwinScreenLocked()
+	case "windows":
+		return isWindowsScreenLocked()
+	default:
+		return false, fmt.Errorf("unsupported platform")
+	}
+}
+
+// Linux implementations
+func getLinuxIdleTime() (time.Duration, error) {
+	// Try xprintidle first
+	if path, err := exec.LookPath("xprintidle"); err == nil {
+		cmd := exec.Command(path)
+		output, err := cmd.Output()
+		if err == nil {
+			ms, _ := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+			return time.Duration(ms) * time.Millisecond, nil
+		}
+	}
+
+	// Try reading /dev/input
+	return getLinuxInputIdleTime()
+}
+
+func getLinuxInputIdleTime() (time.Duration, error) {
+	// Check input device timestamps
+	inputPath := "/dev/input"
+	entries, err := os.ReadDir(inputPath)
+	if err != nil {
+		return 0, err
+	}
+
+	var lastActivity time.Time
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "event") {
+			info, err := os.Stat(filepath.Join(inputPath, entry.Name()))
+			if err == nil {
+				if info.ModTime().After(lastActivity) {
+					lastActivity = info.ModTime()
+				}
+			}
+		}
+	}
+
+	if lastActivity.IsZero() {
+		return 0, fmt.Errorf("no input activity detected")
+	}
+
+	return time.Since(lastActivity), nil
+}
+
+func isLinuxScreenLocked() (bool, error) {
+	// Check for gnome-screensaver
+	cmd := exec.Command("gnome-screensaver-command", "-q")
+	output, _ := cmd.Output()
+	if strings.Contains(string(output), "active") {
+		return true, nil
+	}
+
+	// Check for xscreensaver
+	cmd = exec.Command("xscreensaver-command", "-time")
+	output, _ = cmd.Output()
+	if strings.Contains(string(output), "locked") {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// Darwin implementations
+func getDarwinIdleTime() (time.Duration, error) {
+	// Use ioreg to get HIDIdleTime
+	cmd := exec.Command("ioreg", "-c", "IOHIDSystem")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	re := regexp.MustCompile(`"HIDIdleTime"\s*=\s*(\d+)`)
+	matches := re.FindStringSubmatch(string(output))
+	if len(matches) < 2 {
+		return 0, fmt.Errorf("HIDIdleTime not found")
+	}
+
+	nanos, _ := strconv.ParseInt(matches[1], 10, 64)
+	return time.Duration(nanos) * time.Nanosecond, nil
+}
+
+func isDarwinScreenLocked() (bool, error) {
+	// Check if ScreenSaverEngine is running
+	cmd := exec.Command("pgrep", "ScreenSaverEngine")
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+// Windows implementations
+func getWindowsIdleTime() (time.Duration, error) {
+	var lastInputInfo struct {
+		cbSize uint32
+		time   uint32
+	}
+	lastInputInfo.cbSize = uint32(unsafe.Sizeof(lastInputInfo))
+
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	getTickCount := kernel32.NewProc("GetTickCount")
+	user32 := syscall.NewLazyDLL("user32.dll")
+	getLastInputInfo := user32.NewProc("GetLastInputInfo")
+
+	ret, _, _ := getLastInputInfo.Call(uintptr(unsafe.Pointer(&lastInputInfo)))
+	if ret == 0 {
+		return 0, fmt.Errorf("GetLastInputInfo failed")
+	}
+
+	tickCount, _, _ := getTickCount.Call()
+	idleTicks := uint32(tickCount) - lastInputInfo.time
+
+	return time.Duration(idleTicks) * time.Millisecond, nil
+}
+
+func isWindowsScreenLocked() (bool, error) {
+	// Check if LogonUI is running
+	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq LogonUI.exe")
+	output, _ := cmd.Output()
+	if strings.Contains(string(output), "LogonUI.exe") {
+		return true, nil
+	}
+	return false, nil
 }
