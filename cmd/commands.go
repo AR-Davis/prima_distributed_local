@@ -3,13 +3,13 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/AR-Davis/prima_distributed_local/pkg/config"
 	"github.com/AR-Davis/prima_distributed_local/pkg/detect"
+	"github.com/spf13/cobra"
 )
 
 // runDetect implements the detect command
@@ -47,8 +47,8 @@ func printHardwareProfile(p *detect.HardwareProfile) {
 	fmt.Println()
 
 	// Memory
-	fmt.Printf("💾 Memory: %.1f GB total, %.1f GB available (%.1f%% used)\n",
-		p.Memory.TotalGB, p.Memory.AvailableGB, p.Memory.UsedPercent)
+	fmt.Printf("💾 Memory: %.1f GB total, %.1f GB available\n",
+		p.Memory.TotalGB, p.Memory.AvailableGB)
 	fmt.Printf("   Score: %d/40\n", p.Memory.Score)
 	fmt.Println()
 
@@ -66,18 +66,12 @@ func printHardwareProfile(p *detect.HardwareProfile) {
 
 	// Disk
 	fmt.Printf("💿 Disk: Type=%s, Free=%.1f GB\n", p.Disk.Type, p.Disk.FreeGB)
-	if p.Disk.ReadSpeedMBs > 0 {
-		fmt.Printf("   Read speed: %.0f MB/s\n", p.Disk.ReadSpeedMBs)
-	}
 	fmt.Printf("   Score: %d/15\n", p.Disk.Score)
 	fmt.Println()
 
 	// Network
 	fmt.Printf("🌐 Network: Hostname=%s\n", p.Network.Hostname)
 	fmt.Printf("   Ethernet: %v | WiFi: %v\n", p.Network.HasEthernet, p.Network.HasWiFi)
-	if p.Network.LatencyToHead >= 0 {
-		fmt.Printf("   Latency to head: %.1f ms\n", p.Network.LatencyToHead)
-	}
 	fmt.Println()
 
 	// OS

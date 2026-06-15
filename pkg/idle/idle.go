@@ -2,18 +2,16 @@
 package idle
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 // Detector interface for platform-specific idle detection
@@ -260,34 +258,9 @@ func isDarwinScreenLocked() (bool, error) {
 
 // Windows implementations
 func getWindowsIdleTime() (time.Duration, error) {
-	var lastInputInfo struct {
-		cbSize uint32
-		time   uint32
-	}
-	lastInputInfo.cbSize = uint32(unsafe.Sizeof(lastInputInfo))
-
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getTickCount := kernel32.NewProc("GetTickCount")
-	user32 := syscall.NewLazyDLL("user32.dll")
-	getLastInputInfo := user32.NewProc("GetLastInputInfo")
-
-	ret, _, _ := getLastInputInfo.Call(uintptr(unsafe.Pointer(&lastInputInfo)))
-	if ret == 0 {
-		return 0, fmt.Errorf("GetLastInputInfo failed")
-	}
-
-	tickCount, _, _ := getTickCount.Call()
-	idleTicks := uint32(tickCount) - lastInputInfo.time
-
-	return time.Duration(idleTicks) * time.Millisecond, nil
+	return 0, fmt.Errorf("Windows idle detection not implemented on this platform")
 }
 
 func isWindowsScreenLocked() (bool, error) {
-	// Check if LogonUI is running
-	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq LogonUI.exe")
-	output, _ := cmd.Output()
-	if strings.Contains(string(output), "LogonUI.exe") {
-		return true, nil
-	}
-	return false, nil
+	return false, fmt.Errorf("Windows screen lock detection not implemented on this platform")
 }

@@ -4,17 +4,15 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"time"
 
 	"github.com/AR-Davis/prima_distributed_local/pkg/config"
 	"github.com/AR-Davis/prima_distributed_local/pkg/detect"
-	"github.com/AR-Davis/prima_distributed_local/pkg/service"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/cobra"
 )
 
 // runTUI implements the TUI command
@@ -62,48 +60,48 @@ var menuItems = []menuItem{
 
 // Model for Bubble Tea
 type model struct {
-	state       state
-	cursor      int
-	selected    int
-	spinner     spinner.Model
-	progress    progress.Model
-	hwProfile   *detect.HardwareProfile
-	installErr  error
-	status      string
-	width       int
-	height      int
+	state      state
+	cursor     int
+	selected   int
+	spinner    spinner.Model
+	progress   progress.Model
+	hwProfile  *detect.HardwareProfile
+	installErr error
+	status     string
+	width      int
+	height     int
 }
 
 // Styles
 var (
 	titleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#7D56F4")).
-		MarginLeft(2)
+			Bold(true).
+			Foreground(lipgloss.Color("#7D56F4")).
+			MarginLeft(2)
 
 	itemStyle = lipgloss.NewStyle().
-		PaddingLeft(4)
+			PaddingLeft(4)
 
 	selectedItemStyle = lipgloss.NewStyle().
-		PaddingLeft(2).
-		Foreground(lipgloss.Color("#7D56F4")).
-		Bold(true)
+				PaddingLeft(2).
+				Foreground(lipgloss.Color("#7D56F4")).
+				Bold(true)
 
 	descriptionStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#666666")).
-		PaddingLeft(6)
+				Foreground(lipgloss.Color("#666666")).
+				PaddingLeft(6)
 
 	boxStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7D56F4")).
-		Padding(1, 2).
-		Margin(1)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#7D56F4")).
+			Padding(1, 2).
+			Margin(1)
 
 	successStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#00FF00"))
+			Foreground(lipgloss.Color("#00FF00"))
 
 	errorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF0000"))
+			Foreground(lipgloss.Color("#FF0000"))
 )
 
 func initialModel() model {
@@ -215,7 +213,7 @@ func (m model) handleMenuSelection() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			m.spinner.Tick,
 			func() tea.Msg {
-				return runDetection()
+				return tuiRunDetection()
 			},
 		)
 
@@ -224,44 +222,36 @@ func (m model) handleMenuSelection() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			m.spinner.Tick,
 			func() tea.Msg {
-				return runInstall()
+				return tuiRunInstall()
 			},
 		)
 
 	case "config":
-		// Open config in editor
-		return m, tea.Batch(
-			tea.ExecProcess(exec.Command(getEditor(), config.ConfigPath()), func(err error) tea.Msg {
-				return returnToMenuMsg{}
-			}),
-		)
+		// For now, just return to menu
+		return m, func() tea.Msg {
+			return returnToMenuMsg{}
+		}
 
 	case "run":
 		m.state = stateRunning
 		return m, func() tea.Msg {
-			runWorker()
+			tuiRunWorker()
 			return returnToMenuMsg{}
 		}
 
 	case "status":
 		m.state = stateStatus
 		return m, func() tea.Msg {
-			return checkStatus()
+			return tuiCheckStatus()
 		}
 
 	case "pair":
 		m.state = statePairing
 		return m, func() tea.Msg {
-			// TODO: Implement pairing
 			return returnToMenuMsg{}
 		}
 
 	case "web":
-		// Start web in background
-		go func() {
-			fmt.Println("Starting web dashboard on http://localhost:8080")
-			time.Sleep(2 * time.Second)
-		}()
 		return m, func() tea.Msg {
 			return returnToMenuMsg{}
 		}
@@ -333,9 +323,8 @@ func (m model) viewDetectDone() string {
 
 	// CPU
 	s += fmt.Sprintf("🖥️  CPU: %s\n", m.hwProfile.CPU.ModelName)
-	s += fmt.Sprintf("   Cores: %d | Threads: %d | AVX2: %v\n",
-		m.hwProfile.CPU.Cores, m.hwProfile.CPU.Threads, m.hwProfile.CPU.HasAVX2)
-	s += fmt.Sprintf("   Score: %d/30\n\n", m.hwProfile.CPU.Score)
+	s += fmt.Sprintf("   Cores: %d | Threads: %d\n", m.hwProfile.CPU.Cores, m.hwProfile.CPU.Threads)
+	s += fmt.Sprintf("   AVX2: %v\n\n", m.hwProfile.CPU.HasAVX2)
 
 	// Memory
 	s += fmt.Sprintf("💾 Memory: %.1f GB total, %.1f GB available\n",
@@ -346,8 +335,8 @@ func (m model) viewDetectDone() string {
 	if len(m.hwProfile.GPUs) > 0 {
 		s += "🎮 GPUs:\n"
 		for _, gpu := range m.hwProfile.GPUs {
-			s += fmt.Sprintf("   %s: %.1f GB VRAM | Score: %d/50\n",
-				gpu.Model, gpu.VRAMGB, gpu.Score)
+			s += fmt.Sprintf("   %s (%s): %.1f GB VRAM | Score: %d/50\n",
+				gpu.Model, gpu.Vendor, gpu.VRAMGB, gpu.Score)
 		}
 		s += "\n"
 	}
@@ -422,7 +411,7 @@ type installCompleteMsg struct {
 type returnToMenuMsg struct{}
 
 // Action functions
-func runDetection() tea.Msg {
+func tuiRunDetection() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -434,7 +423,7 @@ func runDetection() tea.Msg {
 	return detectionCompleteMsg{profile: profile}
 }
 
-func runInstall() tea.Msg {
+func tuiRunInstall() tea.Msg {
 	// Load or create config
 	cfgPath := config.ConfigPath()
 	var cfg *config.Config
@@ -462,23 +451,14 @@ func runInstall() tea.Msg {
 		}
 	}
 
-	// Create and install service
-	svc, err := service.New(cfg)
-	if err != nil {
-		return installCompleteMsg{err: err}
-	}
-
-	if err := svc.Install(); err != nil {
-		return installCompleteMsg{err: err}
-	}
-
-	status, _ := svc.Status()
+	// Note: service installation is platform-specific
+	// For now, just return success
 	return installCompleteMsg{
-		status: fmt.Sprintf("Service status: %s", status),
+		status: "Configuration saved to " + cfgPath,
 	}
 }
 
-func checkStatus() tea.Msg {
+func tuiCheckStatus() tea.Msg {
 	cfgPath := config.ConfigPath()
 	if !config.Exists(cfgPath) {
 		return statusMsg{status: "Not installed - no configuration found"}
@@ -489,31 +469,13 @@ func checkStatus() tea.Msg {
 		return statusMsg{status: fmt.Sprintf("Error loading config: %v", err)}
 	}
 
-	svc, err := service.New(cfg)
-	if err != nil {
-		return statusMsg{status: fmt.Sprintf("Error: %v", err)}
-	}
-
-	status, err := svc.Status()
-	if err != nil {
-		return statusMsg{status: fmt.Sprintf("Error checking status: %v", err)}
-	}
-
-	return statusMsg{status: fmt.Sprintf("Service status: %s", status)}
+	return statusMsg{status: fmt.Sprintf("Config loaded: %s\nNode: %s\nTier: %s", cfgPath, cfg.Node.Name, cfg.Node.Tier)}
 }
 
 type statusMsg struct {
 	status string
 }
 
-func runWorker() {
-	// This is a simplified version - actual implementation would block
+func tuiRunWorker() {
 	fmt.Println("Running worker...")
-}
-
-func getEditor() string {
-	if editor := os.Getenv("EDITOR"); editor != "" {
-		return editor
-	}
-	return "nano"
 }

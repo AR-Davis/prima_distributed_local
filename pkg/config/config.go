@@ -155,18 +155,23 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Marshal to TOML
-	data, err := toml.Marshal(c)
+	// Open file for writing
+	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+		return fmt.Errorf("failed to create config file: %w", err)
 	}
+	defer f.Close()
 
 	// Add header comment
 	header := "# Prima Distributed Local - Cluster Configuration\n"
 	header += "# Generated: " + time.Now().Format(time.RFC3339) + "\n\n"
+	if _, err := f.WriteString(header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
 
-	if err := os.WriteFile(path, []byte(header+string(data)), 0600); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+	// Encode to TOML
+	if err := toml.NewEncoder(f).Encode(c); err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
 	}
 
 	return nil
