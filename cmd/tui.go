@@ -134,7 +134,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.state {
 		case stateMenu:
 			return m.handleMenuKeys(msg)
-		case stateDetectDone, stateInstallDone, stateStatus:
+		case stateDetectDone, stateInstallDone, stateStatus, stateRunning:
 			if msg.String() == "enter" || msg.String() == " " || msg.String() == "q" {
 				return m, func() tea.Msg {
 					return returnToMenuMsg{}
@@ -233,10 +233,12 @@ func (m model) handleMenuSelection() (tea.Model, tea.Cmd) {
 		}
 
 	case "run":
-		m.state = stateRunning
+		// Show a status message instead of hanging
 		return m, func() tea.Msg {
-			tuiRunWorker()
-			return returnToMenuMsg{}
+			return installCompleteMsg{
+				status: "⚠️  Run Once is not yet fully implemented.\n\nUse 'detect' and 'install' commands instead.",
+				err:    nil,
+			}
 		}
 
 	case "status":
@@ -386,8 +388,10 @@ func (m model) viewInstallDone() string {
 func (m model) viewRunning() string {
 	s := "\n"
 	s += titleStyle.Render("▶️  Running Worker") + "\n\n"
-	s += "Worker is running in foreground mode.\n"
-	s += "Press Ctrl+C to stop.\n\n"
+	s += "This feature is coming soon.\n\n"
+	s += "The worker process will run Prima in foreground mode\n"
+	s += "for testing before installing as a service.\n\n"
+	s += descriptionStyle.Render("Press Enter to return to menu") + "\n"
 	return s
 }
 

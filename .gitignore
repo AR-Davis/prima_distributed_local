@@ -47,3 +47,6 @@ cluster.toml
 *.tmp
 *.temp
 /testdata/
+
+# USB deployment folder (generated)
+usb-deploy/
