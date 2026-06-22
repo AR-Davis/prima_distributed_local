@@ -1,0 +1,68 @@
+# Mycelium API Configuration
+# Platform-neutral: works on Linux, macOS, Windows
+# Override config path with MYCELIUM_CONFIG environment variable
+
+server:
+  host: "0.0.0.0"
+  port: 11435  # One port above Ollama so they coexist
+
+routing:
+  # Huginn: fast local queries
+  # Routes to local/GPU nodes for low latency
+  huginn:
+    pools:
+      - local
+    timeout: 30s
+
+  # Muninn: deep remote responses
+  # Routes to remote/edge nodes for distributed compute
+  muninn:
+    pools:
+      - remote
+      - edge
+      - local
+    timeout: 300s
+
+  # Skald: precise vocabulary
+  # Routes to local for deterministic output
+  skald:
+    pools:
+      - local
+    timeout: 30s
+
+  # Default routing when no profile matches
+  default: "huginn"
+
+  # Fallback to local Ollama when all Mycelium nodes are down
+  fallback_local: "localhost:11434"
+
+nodes:
+  # Example: GPU head node running Ollama
+  - name: hearth
+    host: "localhost"
+    api_port: 11434  # Ollama HTTP API
+    type: gpu
+    pool: local
+    weight: 10
+
+  # Example: CPU worker via Tailscale
+  # - name: ember
+  #   host: "100.x.x.x"  # Tailscale IP
+  #   port: 50052          # prima.cpp RPC port
+  #   type: cpu
+  #   pool: remote
+  #   weight: 1
+  #   timeout: 300s
+
+  # Example: ARM edge device (Phone, RPi)
+  # - name: pixel-2
+  #   host: "100.x.x.x"  # Tailscale IP
+  #   port: 50052          # prima.cpp RPC port
+  #   type: arm
+  #   pool: edge
+  #   weight: 3
+  #   timeout: 60s
+
+logging:
+  level: "info"
+  format: "text"

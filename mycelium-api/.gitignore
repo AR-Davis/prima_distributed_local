@@ -1,0 +1,17 @@
+# Binaries
+mycelium-api
+mycelium-api.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config overrides
+configs/local.yaml
+configs/*.local.yaml
