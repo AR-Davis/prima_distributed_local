@@ -1,19 +1,17 @@
-# Binaries (specific paths to avoid matching directory names)
-/mycelium-api
-/mycelium-api.exe
-cmd/mycelium-api/mycelium-api
-cmd/mycelium-api/mycelium-api.exe
+# Binaries
+mycelium-api
+mycelium-api.exe
+*.exe
+
+# Build artifacts
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Config overrides
-configs/local.yaml
-configs/*.local.yaml
