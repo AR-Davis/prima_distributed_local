@@ -1,6 +1,8 @@
-# Binaries
-mycelium-api
-mycelium-api.exe
+# Binaries (specific paths to avoid matching directory names)
+/mycelium-api
+/mycelium-api.exe
+cmd/mycelium-api/mycelium-api
+cmd/mycelium-api/mycelium-api.exe
 
 # IDE
 .idea/
