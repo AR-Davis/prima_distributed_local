@@ -1,0 +1,356 @@
+#!/usr/bin/env sh
+# mycelium — The Mycelium Network Access Point
+# 
+# Usage:
+#   mycelium              Start the network (API + RPC node)
+#   mycelium api          Start the API gateway only
+#   mycelium node         Start the RPC compute node only
+#   mycelium status       Check network status
+#   mycelium probe        Probe all RPC nodes for device memory
+#   mycelium shell        Open an Ollama-compatible chat session
+#   mycelium stop         Stop the network
+#   mycelium help         Show this help
+#
+# Works on: Linux, macOS, Windows (Git Bash/WSL), Termux/Android
+# Each machine is both an access point and a compute node.
+
+set -e
+
+# --- Configuration ---
+MYCELIUM_PORT="${MYCELIUM_PORT:-11435}"
+MYCELIUM_HOST="${MYCELIUM_HOST:-0.0.0.0}"
+MYCELIUM_CONFIG="${MYCELIUM_CONFIG:-}"
+MYCELIUM_RPC_PORT="${MYCELIUM_RPC_PORT:-50052}"
+MYCELIUM_RPC_HOST="${MYCELIUM_RPC_HOST:-0.0.0.0}"
+MYCELIUM_BIN="${MYCELIUM_BIN:-}"
+
+# --- Detect platform ---
+detect_platform() {
+    case "$(uname -s)" in
+        Linux*)   
+            if [ -d "/data/data/com.termux" ] 2>/dev/null || [ -n "$TERMUX_VERSION" ]; then
+                echo "termux"
+            elif [ -f "/proc/version" ] && grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "wsl"
+            else
+                echo "linux"
+            fi
+            ;;
+        Darwin*)  echo "macos" ;;
+        MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+        *)        echo "unknown" ;;
+    esac
+}
+
+# --- Find the mycelium-api binary ---
+find_binary() {
+    if [ -n "$MYCELIUM_BIN" ] && [ -x "$MYCELIUM_BIN" ]; then
+        echo "$MYCELIUM_BIN"
+        return 0
+    fi
+    
+    # Check alongside this script (same directory)
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$script_dir/mycelium-api" ]; then
+        echo "$script_dir/mycelium-api"
+        return 0
+    fi
+    if [ -x "$script_dir/mycelium-api.exe" ]; then
+        echo "$script_dir/mycelium-api.exe"
+        return 0
+    fi
+    
+    # Check in PATH
+    if command -v mycelium-api >/dev/null 2>&1; then
+        command -v mycelium-api
+        return 0
+    fi
+    
+    # Check common locations
+    for dir in "$HOME/.local/bin" "$HOME/bin" "/usr/local/bin" "$HOME/Projects/mycelium-api"; do
+        if [ -x "$dir/mycelium-api" ] || [ -x "$dir/mycelium-api.exe" ]; then
+            echo "$dir/mycelium-api"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# --- Find the rpc-server binary (for compute nodes) ---
+find_rpc_server() {
+    # Check alongside this script
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$script_dir/rpc-server" ]; then
+        echo "$script_dir/rpc-server"
+        return 0
+    fi
+    
+    # Check in prima.cpp build directory
+    for dir in "$HOME/prima.cpp/build/bin" "$HOME/.local/bin"; do
+        if [ -x "$dir/rpc-server" ]; then
+            echo "$dir/rpc-server"
+            return 0
+        fi
+    done
+    
+    # Check in PATH
+    if command -v rpc-server >/dev/null 2>&1; then
+        command -v rpc-server
+        return 0
+    fi
+    
+    return 1
+}
+
+# --- Check if a port is in use ---
+port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tlnp 2>/dev/null | grep -q ":${port} "
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tlnp 2>/dev/null | grep -q ":${port} "
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -i ":${port}" >/dev/null 2>&1
+    else
+        # Fallback: try to connect
+        ! (echo >/dev/tcp/localhost/"$port") 2>/dev/null
+    fi
+}
+
+# --- Start the API gateway ---
+start_api() {
+    local bin
+    if ! bin="$(find_binary)"; then
+        echo "ERROR: mycelium-api binary not found."
+        echo "Set MYCELIUM_BIN to the path of the binary, or install it in your PATH."
+        exit 1
+    fi
+    
+    echo ""
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║     Mycelium Network — Access Point     ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo ""
+    echo "  Binary: $bin"
+    echo "  API:    http://${MYCELIUM_HOST}:${MYCELIUM_PORT}"
+    echo "  Config: ${MYCELIUM_CONFIG:-<defaults>}"
+    echo "  Platform: $(detect_platform)"
+    echo ""
+    
+    local args="-port ${MYCELIUM_PORT} -host ${MYCELIUM_HOST}"
+    if [ -n "$MYCELIUM_CONFIG" ]; then
+        args="$args -config $MYCELIUM_CONFIG"
+    fi
+    
+    exec "$bin" $args
+}
+
+# --- Start the RPC compute node ---
+start_node() {
+    local rpc_bin
+    if ! rpc_bin="$(find_rpc_server)"; then
+        echo "ERROR: rpc-server binary not found."
+        echo "Build prima.cpp with rpc-server enabled, or set PATH."
+        exit 1
+    fi
+    
+    echo ""
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║     Mycelium Network — Compute Node     ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo ""
+    echo "  Binary:  $rpc_bin"
+    echo "  RPC:     ${MYCELIUM_RPC_HOST}:${MYCELIUM_RPC_PORT}"
+    echo "  Platform: $(detect_platform)"
+    echo ""
+    
+    exec "$rpc_bin" -H "$MYCELIUM_RPC_HOST" -p "$MYCELIUM_RPC_PORT"
+}
+
+# --- Start both (full node: API + compute) ---
+start_full() {
+    echo ""
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║    Mycelium Network — Full Node         ║"
+    echo "  ║    (Access Point + Compute Node)         ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo ""
+    
+    local platform
+    platform="$(detect_platform)"
+    echo "  Platform: $platform"
+    echo "  API:      http://${MYCELIUM_HOST}:${MYCELIUM_PORT}"
+    echo "  RPC:      ${MYCELIUM_RPC_HOST}:${MYCELIUM_RPC_PORT}"
+    echo ""
+    
+    # Start RPC server in background
+    if rpc_bin="$(find_rpc_server)"; then
+        echo "  Starting compute node: $rpc_bin"
+        "$rpc_bin" -H "$MYCELIUM_RPC_HOST" -p "$MYCELIUM_RPC_PORT" &
+        RPC_PID=$!
+        echo "  RPC PID: $RPC_PID"
+        sleep 1
+    else
+        echo "  WARNING: rpc-server not found, skipping compute node"
+    fi
+    
+    # Start API gateway in foreground
+    if bin="$(find_binary)"; then
+        echo "  Starting access point: $bin"
+        local args="-port ${MYCELIUM_PORT} -host ${MYCELIUM_HOST}"
+        if [ -n "$MYCELIUM_CONFIG" ]; then
+            args="$args -config $MYCELIUM_CONFIG"
+        fi
+        "$bin" $args
+        API_PID=$!
+    else
+        echo "  ERROR: mycelium-api binary not found."
+        if [ -n "$RPC_PID" ]; then
+            kill "$RPC_PID" 2>/dev/null
+        fi
+        exit 1
+    fi
+}
+
+# --- Check network status ---
+show_status() {
+    local bin
+    if ! bin="$(find_binary)"; then
+        echo "ERROR: mycelium-api binary not found."
+        exit 1
+    fi
+    
+    local port="${MYCELIUM_PORT}"
+    local url="http://localhost:${port}/api/status"
+    
+    if command -v curl >/dev/null 2>&1; then
+        curl -s "$url" | python3 -m json.tool 2>/dev/null || curl -s "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$url"
+    else
+        echo "Need curl or wget to check status."
+        echo "API: $url"
+    fi
+}
+
+# --- Probe RPC nodes ---
+probe_rpc() {
+    local port="${MYCELIUM_PORT}"
+    local url="http://localhost:${port}/api/rpc/probe"
+    
+    if command -v curl >/dev/null 2>&1; then
+        curl -s "$url" | python3 -m json.tool 2>/dev/null || curl -s "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$url"
+    else
+        echo "Need curl or wget to probe."
+        echo "API: $url"
+    fi
+}
+
+# --- Open a chat session ---
+open_shell() {
+    local port="${MYCELIUM_PORT}"
+    local url="http://localhost:${port}"
+    
+    echo "Connecting to Mycelium at $url"
+    echo "Type /quit to exit, /status for network status"
+    echo ""
+    
+    # Simple interactive chat loop
+    while true; do
+        printf "> "
+        read -r prompt
+        
+        case "$prompt" in
+            /quit|/exit) echo "Bye."; exit 0 ;;
+            /status) show_status; continue ;;
+            /probe) probe_rpc; continue ;;
+            "") continue ;;
+        esac
+        
+        if command -v curl >/dev/null 2>&1; then
+            curl -s -X POST "$url/api/generate" \
+                -H "Content-Type: application/json" \
+                -d "{\"model\":\"llama3.2:1b\",\"prompt\":\"$prompt\",\"stream\":false}" | \
+                python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('response',''))" 2>/dev/null
+        else
+            echo "Need curl for chat."
+        fi
+        echo ""
+    done
+}
+
+# --- Stop the network ---
+stop_network() {
+    echo "Stopping Mycelium..."
+    
+    # Kill mycelium-api
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -f "mycelium-api" 2>/dev/null || true
+        pkill -f "rpc-server" 2>/dev/null || true
+    elif command -v taskkill >/dev/null 2>&1; then
+        taskkill /F /IM mycelium-api.exe 2>/dev/null || true
+    fi
+    
+    echo "Stopped."
+}
+
+# --- Main ---
+case "${1:-}" in
+    api)
+        start_api
+        ;;
+    node)
+        start_node
+        ;;
+    full)
+        start_full
+        ;;
+    status)
+        show_status
+        ;;
+    probe)
+        probe_rpc
+        ;;
+    shell|chat)
+        open_shell
+        ;;
+    stop)
+        stop_network
+        ;;
+    help|--help|-h|"")
+        echo ""
+        echo "  mycelium — The Mycelium Network Access Point"
+        echo "  Each machine is both an access point and a compute node."
+        echo ""
+        echo "  Usage: mycelium <command>"
+        echo ""
+        echo "  Commands:"
+        echo "    (none)    Start full node (API gateway + RPC compute)"
+        echo "    api        Start the API gateway only"
+        echo "    node       Start the RPC compute node only"
+        echo "    full       Start both API and RPC node"
+        echo "    status     Check network status"
+        echo "    probe      Probe RPC nodes for device memory"
+        echo "    shell      Open an interactive chat session"
+        echo "    stop       Stop the network"
+        echo "    help       Show this help"
+        echo ""
+        echo "  Environment variables:"
+        echo "    MYCELIUM_PORT      API port (default: 11435)"
+        echo "    MYCELIUM_HOST      API host (default: 0.0.0.0)"
+        echo "    MYCELIUM_RPC_PORT  RPC compute port (default: 50052)"
+        echo "    MYCELIUM_RPC_HOST  RPC compute host (default: 0.0.0.0)"
+        echo "    MYCELIUM_CONFIG    Path to config YAML"
+        echo "    MYCELIUM_BIN       Path to mycelium-api binary"
+        echo ""
+        echo "  The Mycelium Network: distributed inference across the Coven."
+        echo ""
+        ;;
+    *)
+        # Default: start full node
+        start_full
+        ;;
+esac

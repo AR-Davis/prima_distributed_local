@@ -13,6 +13,7 @@ import (
 
 	"github.com/aaronrdavis/mycelium-api/internal/config"
 	"github.com/aaronrdavis/mycelium-api/internal/node"
+	"github.com/aaronrdavis/mycelium-api/internal/rpc"
 	"github.com/aaronrdavis/mycelium-api/internal/routing"
 )
 
@@ -105,11 +106,14 @@ type StatusResponse struct {
 }
 
 type NodeStatus struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Status  string `json:"status"`
-	Latency string `json:"latency"`
-	Pool    string `json:"pool"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Status   string `json:"status"`
+	Latency  string `json:"latency"`
+	Pool     string `json:"pool"`
+	Protocol string `json:"protocol,omitempty"`
+	FreeMem  string `json:"free_mem,omitempty"`
+	TotalMem string `json:"total_mem,omitempty"`
 }
 
 type RoutingStatus struct {
@@ -130,6 +134,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Mycelium extensions
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/routes", s.handleRoutes)
+	mux.HandleFunc("/api/rpc/probe", s.handleRPCProbe)
 
 	mux.HandleFunc("/", s.handleRoot)
 }
@@ -230,11 +235,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			latency = n.GetLatency().Round(time.Millisecond).String()
 		}
 		nodeStatuses[i] = NodeStatus{
-			Name:    n.GetName(),
-			Type:    string(n.GetType()),
-			Status:  string(n.GetStatus()),
-			Latency: latency,
-			Pool:    n.GetPool(),
+			Name:     n.GetName(),
+			Type:     string(n.GetType()),
+			Status:   string(n.GetStatus()),
+			Latency:  latency,
+			Pool:     n.GetPool(),
+			Protocol: string(n.Config.Protocol),
+			FreeMem:  rpc.FormatMemory(n.GetFreeMem()),
+			TotalMem: rpc.FormatMemory(n.GetTotalMem()),
 		}
 	}
 
@@ -371,4 +379,71 @@ func profileOrDefault(p string) string {
 		return p
 	}
 	return "auto"
+}
+
+
+// handleRPCProbe probes all RPC nodes and returns their device memory info.
+func (s *Server) handleRPCProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	type probeResult struct {
+		Addr      string `json:"addr"`
+		Connected bool   `json:"connected"`
+		FreeMem   string `json:"free_mem,omitempty"`
+		TotalMem  string `json:"total_mem,omitempty"`
+		Alignment uint64 `json:"alignment,omitempty"`
+		MaxSize   string `json:"max_size,omitempty"`
+		Latency   string `json:"latency,omitempty"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	var results []probeResult
+	for _, n := range s.Manager.AllNodes() {
+		if n.Config.Protocol != config.ProtocolRPC {
+			continue
+		}
+		addr := fmt.Sprintf("%s:%d", n.Config.Host, n.Config.Port)
+		client := rpc.NewClient(addr)
+
+		start := time.Now()
+		if err := client.Dial(); err != nil {
+			results = append(results, probeResult{
+				Addr:  addr,
+				Error: err.Error(),
+			})
+			continue
+		}
+
+		mem, err := client.GetDeviceMemory()
+		if err != nil {
+			client.Close()
+			results = append(results, probeResult{
+				Addr:  addr,
+				Error: err.Error(),
+			})
+			continue
+		}
+
+		alignment, _ := client.GetAlignment()
+		maxSize, _ := client.GetMaxSize()
+		latency := time.Since(start)
+		client.Close()
+
+		results = append(results, probeResult{
+			Addr:      addr,
+			Connected: true,
+			FreeMem:   rpc.FormatMemory(mem.Free),
+			TotalMem:  rpc.FormatMemory(mem.Total),
+			Alignment: alignment,
+			MaxSize:   rpc.FormatMemory(maxSize),
+			Latency:   latency.Round(time.Millisecond).String(),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"rpc_nodes": results,
+	})
 }

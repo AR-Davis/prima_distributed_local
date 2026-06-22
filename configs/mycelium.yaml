@@ -42,6 +42,7 @@ nodes:
     host: "localhost"
     api_port: 11434  # Ollama HTTP API
     type: gpu
+    protocol: ollama
     pool: local
     weight: 10
 
@@ -51,6 +52,7 @@ nodes:
     host: "100.90.116.1"
     port: 50052  # prima.cpp RPC port
     type: cpu
+    protocol: rpc
     pool: remote
     weight: 1
     timeout: 300s
@@ -61,6 +63,7 @@ nodes:
     host: "100.77.170.98"
     port: 50052  # prima.cpp RPC port
     type: arm
+    protocol: rpc
     pool: edge
     weight: 3
     timeout: 60s
