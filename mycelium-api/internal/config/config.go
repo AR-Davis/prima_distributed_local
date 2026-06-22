@@ -42,14 +42,15 @@ type RouteRule struct {
 
 // NodeConfig describes a single Mycelium inference node.
 type NodeConfig struct {
-	Name    string        `yaml:"name"`
-	Host    string        `yaml:"host"`
-	Port    int           `yaml:"port"`
-	APIPort int           `yaml:"api_port"`
-	Type    NodeType      `yaml:"type"`
-	Pool    string        `yaml:"pool"`
-	Weight  int           `yaml:"weight"`
-	Timeout time.Duration `yaml:"timeout,omitempty"`
+	Name     string        `yaml:"name"`
+	Host     string        `yaml:"host"`
+	Port     int           `yaml:"port"`
+	APIPort  int           `yaml:"api_port"`
+	Type     NodeType      `yaml:"type"`
+	Protocol ProtocolType  `yaml:"protocol"`
+	Pool     string        `yaml:"pool"`
+	Weight   int           `yaml:"weight"`
+	Timeout  time.Duration `yaml:"timeout,omitempty"`
 }
 
 // NodeType categorizes node hardware.
@@ -59,6 +60,14 @@ const (
 	NodeTypeGPU NodeType = "gpu"
 	NodeTypeCPU NodeType = "cpu"
 	NodeTypeARM NodeType = "arm"
+)
+
+// ProtocolType represents the communication protocol for a node.
+type ProtocolType string
+
+const (
+	ProtocolOllama ProtocolType = "ollama"
+	ProtocolRPC    ProtocolType = "rpc"
 )
 
 // LoggingConfig controls log output.
@@ -92,30 +101,33 @@ func DefaultConfig() *Config {
 		},
 		Nodes: []NodeConfig{
 			{
-				Name:    "hearth",
-				Host:    "localhost",
-				APIPort: 11434,
-				Type:    NodeTypeGPU,
-				Pool:    "local",
-				Weight:  10,
+				Name:     "hearth",
+				Host:     "localhost",
+				APIPort:  11434,
+				Type:     NodeTypeGPU,
+				Protocol: ProtocolOllama,
+				Pool:     "local",
+				Weight:   10,
 			},
 			{
-				Name:    "ember",
-				Host:    "100.90.116.1",
-				Port:    50052,
-				Type:    NodeTypeCPU,
-				Pool:    "remote",
-				Weight:  1,
-				Timeout: 300 * time.Second,
+				Name:     "ember",
+				Host:     "100.90.116.1",
+				Port:     50052,
+				Type:     NodeTypeCPU,
+				Protocol: ProtocolRPC,
+				Pool:     "remote",
+				Weight:   1,
+				Timeout:  300 * time.Second,
 			},
 			{
-				Name:    "pixel-2",
-				Host:    "100.77.170.98",
-				Port:    50052,
-				Type:    NodeTypeARM,
-				Pool:    "edge",
-				Weight:  3,
-				Timeout: 60 * time.Second,
+				Name:     "pixel-2",
+				Host:     "100.77.170.98",
+				Port:     50052,
+				Type:     NodeTypeARM,
+				Protocol: ProtocolRPC,
+				Pool:     "edge",
+				Weight:   3,
+				Timeout:  60 * time.Second,
 			},
 		},
 		Logging: LoggingConfig{
