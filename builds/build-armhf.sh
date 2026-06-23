@@ -31,14 +31,13 @@ echo "[3/6] Cloning prima.cpp..."
 BUILD_DIR="${BUILD_DIR:-$HOME/build}"
 mkdir -p "$BUILD_DIR"
 if [ ! -d "$BUILD_DIR/prima.cpp" ]; then
-    git clone https://github.com/ggml-org/prima.cpp.git "$BUILD_DIR/prima.cpp"
+    git clone https://github.com/AR-Davis/prima.cpp.git "$BUILD_DIR/prima.cpp"
 fi
 cd "$BUILD_DIR/prima.cpp"
 
-# Apply the patch
-echo "[4/6] Applying INIT_TENSOR patch..."
-cp "$PATCHED_SRC" ggml/src/ggml-rpc.cpp
-grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified" || { echo "ERROR: Patch verification failed"; exit 1; }
+# Verify the patch is already committed
+echo "[4/6] Verifying INIT_TENSOR patch..."
+grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified" || { echo "ERROR: Patch missing in source tree"; exit 1; }
 
 # Build CPU-only, single thread to save RAM
 echo "[5/6] Building rpc-server (armhf, single thread)..."

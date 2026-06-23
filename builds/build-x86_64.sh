@@ -8,15 +8,6 @@ echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PATCHED_SRC="$SCRIPT_DIR/ggml-rpc.cpp.patched"
-
-if [ ! -f "$PATCHED_SRC" ]; then
-    echo "ERROR: ggml-rpc.cpp.patched not found in $SCRIPT_DIR"
-    echo "       This file contains the INIT_TENSOR patch (command 11)."
-    echo "       Without it, the protocol won't match mycelium-api."
-    exit 1
-fi
-
 # Install build deps
 echo "[1/5] Installing build dependencies..."
 sudo apt update -y && sudo apt install -y build-essential git cmake
@@ -26,14 +17,13 @@ echo "[2/5] Cloning prima.cpp..."
 BUILD_DIR="${BUILD_DIR:-$HOME/build}"
 mkdir -p "$BUILD_DIR"
 if [ ! -d "$BUILD_DIR/prima.cpp" ]; then
-    git clone https://github.com/ggml-org/prima.cpp.git "$BUILD_DIR/prima.cpp"
+    git clone https://github.com/AR-Davis/prima.cpp.git "$BUILD_DIR/prima.cpp"
 fi
 cd "$BUILD_DIR/prima.cpp"
 
-# Apply the patch
-echo "[3/5] Applying INIT_TENSOR patch..."
-cp "$PATCHED_SRC" ggml/src/ggml-rpc.cpp
-grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified: INIT_TENSOR present" || { echo "ERROR: Patch verification failed"; exit 1; }
+# Verify the patch is already committed
+echo "[3/5] Verifying INIT_TENSOR patch..."
+grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified: INIT_TENSOR present" || { echo "ERROR: Patch missing in source tree"; exit 1; }
 
 # Build CPU-only
 echo "[4/5] Building rpc-server (CPU-only, no CUDA)..."

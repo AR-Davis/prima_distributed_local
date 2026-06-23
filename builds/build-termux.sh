@@ -25,14 +25,13 @@ echo "[2/5] Cloning prima.cpp..."
 BUILD_DIR="${BUILD_DIR:-$HOME/build}"
 mkdir -p "$BUILD_DIR"
 if [ ! -d "$BUILD_DIR/prima.cpp" ]; then
-    git clone https://github.com/ggml-org/prima.cpp.git "$BUILD_DIR/prima.cpp"
+    git clone https://github.com/AR-Davis/prima.cpp.git "$BUILD_DIR/prima.cpp"
 fi
 cd "$BUILD_DIR/prima.cpp"
 
-# Apply the patch
-echo "[3/5] Applying INIT_TENSOR patch..."
-cp "$PATCHED_SRC" ggml/src/ggml-rpc.cpp
-grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified" || { echo "ERROR: Patch verification failed"; exit 1; }
+# Verify the patch is already committed
+echo "[3/5] Verifying INIT_TENSOR patch..."
+grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified" || { echo "ERROR: Patch missing in source tree"; exit 1; }
 
 # Build with clang (Android's gcc is not available)
 echo "[4/5] Building rpc-server (Termux, clang)..."
