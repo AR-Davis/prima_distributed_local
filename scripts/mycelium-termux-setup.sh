@@ -1,27 +1,53 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # mycelium-termux-setup.sh
 # Run this once on a Termux device to set up the Mycelium compute node.
+# This builds rpc-server with the INIT_TENSOR patch for protocol compatibility.
 set -e
 
 echo "  Mycelium Network — Termux Setup"
 echo ""
 
 # Update packages
-echo "[1/4] Updating packages..."
+echo "[1/5] Updating packages..."
 pkg update -y && pkg upgrade -y
 
 # Install dependencies
-echo "[2/4] Installing dependencies..."
+echo "[2/5] Installing dependencies..."
 pkg install -y git cmake clang make wget
 
-# Build rpc-server
-echo "[3/4] Building rpc-server..."
-if [ ! -d "$HOME/prima.cpp" ]; then
-    git clone https://github.com/AR-Davis/prima_distributed_local.git "$HOME/prima.cpp"
+# Build rpc-server with patched source
+echo "[3/5] Building rpc-server (with INIT_TENSOR patch)..."
+BUILD_DIR="${BUILD_DIR:-$HOME/build}"
+mkdir -p "$BUILD_DIR"
+if [ ! -d "$BUILD_DIR/prima.cpp" ]; then
+    git clone https://github.com/ggml-org/prima.cpp.git "$BUILD_DIR/prima.cpp"
 fi
-cd "$HOME/prima.cpp" && mkdir -p build && cd build
-cmake .. -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j$(nproc)
+cd "$BUILD_DIR/prima.cpp"
+
+# Check for patched ggml-rpc.cpp (pushed via ADB)
+PATCHED_SRC="${PATCHED_SRC:-/sdcard/ggml-rpc.cpp.patched}"
+if [ -f "$PATCHED_SRC" ]; then
+    echo "  Applying INIT_TENSOR patch from $PATCHED_SRC"
+    cp "$PATCHED_SRC" ggml/src/ggml-rpc.cpp
+    grep -q "RPC_CMD_INIT_TENSOR" ggml/src/ggml-rpc.cpp && echo "  Patch verified" || { echo "ERROR: Patch verification failed"; exit 1; }
+else
+    echo "  WARNING: Patched ggml-rpc.cpp not found at $PATCHED_SRC"
+    echo "  Building from unpatched source — protocol may not match mycelium-api"
+    echo "  Push the patched file: adb push ggml-rpc.cpp.patched /sdcard/"
+fi
+
+mkdir -p build && cd build
+cmake .. -DGGML_RPC=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF \
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build . --target rpc-server --config Release -j$(nproc)
+
+# Install
+echo "[4/5] Installing..."
+MYCELIUM_DIR="${MYCELIUM_DIR:-$HOME/mycelium}"
+mkdir -p "$MYCELIUM_DIR"
+cp bin/rpc-server "$MYCELIUM_DIR/rpc-server"
+chmod +x "$MYCELIUM_DIR/rpc-server"
 
 # Install launcher
 mkdir -p "$HOME/bin"
@@ -29,7 +55,7 @@ cat > "$HOME/bin/mycelium" << 'LAUNCHER'
 #!/data/data/com.termux/files/usr/bin/sh
 MYCELIUM_RPC_PORT="${MYCELIUM_RPC_PORT:-50052}"
 MYCELIUM_RPC_HOST="${MYCELIUM_RPC_HOST:-0.0.0.0}"
-MYCELIUM_RPC_BIN="${MYCELIUM_RPC_BIN:-$HOME/prima.cpp/build/bin/rpc-server}"
+MYCELIUM_RPC_BIN="${MYCELIUM_RPC_BIN:-$HOME/mycelium/rpc-server}"
 
 case "${1:-node}" in
     node)
@@ -60,4 +86,4 @@ chmod +x "$HOME/bin/mycelium"
 grep -q "$HOME/bin" "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
 export PATH="$HOME/bin:$PATH"
 
-echo "[4/4] Done! Type 'mycelium' to start the compute node."
+echo "[5/5] Done! Type 'mycelium' to start the compute node."

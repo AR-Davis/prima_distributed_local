@@ -1,6 +1,16 @@
 # Binaries
 mycelium-api
 mycelium-api.exe
+*.exe
+
+# Build artifacts
+dist/
+builds/*.o
+builds/*.obj
+
+# OS files
+.DS_Store
+Thumbs.db
 
 # IDE
 .idea/
@@ -8,10 +18,5 @@ mycelium-api.exe
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Config overrides (keep example config)
-configs/local.yaml
-configs/*.local.yaml
+# Config overrides (keep example configs in repo, ignore local overrides)
+mycelium.local.yaml

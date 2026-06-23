@@ -1,0 +1,121 @@
+# Mycelium Unified Config — Example with all Coven nodes
+# Copy this file to mycelium.yaml and customize for your node.
+# Each node should set its own host to "localhost" and pool to "local".
+# Remote nodes use Tailscale IPs.
+
+server:
+  host: "0.0.0.0"
+  port: 11435  # One port above Ollama so they coexist
+
+routing:
+  # Huginn: fast local queries
+  huginn:
+    pools:
+      - local
+    timeout: 30s
+
+  # Muninn: deep remote responses
+  muninn:
+    pools:
+      - remote
+      - edge
+      - local
+    timeout: 300s
+
+  # Skald: precise vocabulary
+  skald:
+    pools:
+      - local
+    timeout: 30s
+
+  # Default routing when no profile matches
+  default: "huginn"
+
+  # Fallback to local Ollama when all Mycelium nodes are down
+  fallback_local: "localhost:11434"
+
+nodes:
+  # Hearth: TheTower GPU (GTX 1650, CUDA)
+  # Ollama HTTP API — requires OLLAMA_HOST=0.0.0.0 for remote access
+  - name: hearth
+    host: "100.117.183.84"
+    api_port: 11434
+    type: gpu
+    protocol: ollama
+    pool: remote
+    weight: 10
+    timeout: 30s
+  # ON TheTower: set host to "localhost" and pool to "local"
+
+  # Ember: AMD E-350 CPU worker (HP DM1)
+  # prima.cpp rpc-server via Tailscale
+  - name: ember
+    host: "100.90.116.1"
+    port: 50052
+    type: cpu
+    protocol: rpc
+    pool: remote
+    weight: 1
+    timeout: 300s
+
+  # Pixel 2: Snapdragon 835 ARM worker
+  # prima.cpp rpc-server in Termux
+  - name: pixel-2
+    host: "100.77.170.98"
+    port: 50052
+    type: arm
+    protocol: rpc
+    pool: edge
+    weight: 3
+    timeout: 60s
+
+  # Shepherd: Dell Latitude i5 CPU
+  # API gateway + optional local Ollama compute
+  - name: shepherd
+    host: "100.114.59.18"
+    api_port: 11434
+    type: cpu
+    protocol: ollama
+    pool: remote
+    weight: 5
+    timeout: 60s
+  # ON Shepherd: set host to "localhost" and pool to "local"
+  # If no Ollama installed, remove this node and run as API gateway only
+
+  # Panther: Rhubarb's local Ollama (RPi5)
+  # Only works if Panther's Ollama is bound to 0.0.0.0
+  - name: panther
+    host: "100.117.58.104"
+    api_port: 11434
+    type: arm
+    protocol: ollama
+    pool: remote
+    weight: 2
+    timeout: 60s
+  # ON Rhubarb: set host to "localhost" and pool to "local"
+
+  # Crow: RPi Zero 2W (armhf, 512MB RAM)
+  # rpc-server — lightweight, weight=1
+  - name: crow
+    host: "100.97.71.98"
+    port: 50052
+    type: cpu
+    protocol: rpc
+    pool: edge
+    weight: 1
+    timeout: 300s
+
+  # Wren: RPi Zero 2W (armhf, 512MB RAM)
+  # rpc-server — lightweight, weight=1
+  - name: wren
+    host: "100.83.89.53"
+    port: 50052
+    type: cpu
+    protocol: rpc
+    pool: edge
+    weight: 1
+    timeout: 300s
+
+logging:
+  level: "info"
+  format: "text"
