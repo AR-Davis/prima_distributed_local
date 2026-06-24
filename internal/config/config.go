@@ -11,10 +11,24 @@ import (
 
 // Config is the top-level configuration for mycelium-api.
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	Routing RoutingConfig `yaml:"routing"`
-	Nodes   []NodeConfig  `yaml:"nodes"`
-	Logging LoggingConfig `yaml:"logging"`
+	Server       ServerConfig       `yaml:"server"`
+	Routing      RoutingConfig      `yaml:"routing"`
+	Nodes        []NodeConfig       `yaml:"nodes"`
+	Logging      LoggingConfig      `yaml:"logging"`
+	LlamaServer  LlamaServerConfig  `yaml:"llama_server"`
+}
+
+// LlamaServerConfig controls the llama-server subprocess used for
+// RPC-distributed inference. When RPC nodes are healthy, mycelium-api
+// launches llama-server with --rpc to offload compute.
+type LlamaServerConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	BinaryPath string   `yaml:"binary_path"`  // path in WSL, e.g. ~/prima.cpp/llama-server
+	ModelPath  string   `yaml:"model_path"`   // path in WSL, e.g. ~/prima.cpp/models/qwen2.5-3b-instruct-q4_k_m.gguf
+	Port       int      `yaml:"port"`         // localhost port for llama-server (default 8090)
+	WSL        bool     `yaml:"wsl"`          // launch via wsl -e bash -c
+	NGL        int      `yaml:"ngl"`          // GPU layers (0 for RPC-only, 99 for full GPU)
+	ExtraArgs  []string `yaml:"extra_args"`   // additional CLI args
 }
 
 // ServerConfig controls the HTTP listener.
@@ -133,6 +147,15 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "text",
+		},
+		LlamaServer: LlamaServerConfig{
+			Enabled:    false,
+			BinaryPath:  "~/prima.cpp/llama-server",
+			ModelPath:   "~/prima.cpp/models/qwen2.5-3b-instruct-q4_k_m.gguf",
+			Port:        8090,
+			WSL:         true,
+			NGL:         0,
+			ExtraArgs:   []string{},
 		},
 	}
 }

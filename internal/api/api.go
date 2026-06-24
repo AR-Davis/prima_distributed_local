@@ -12,24 +12,30 @@ import (
 	"time"
 
 	"github.com/aaronrdavis/mycelium-api/internal/config"
+	"github.com/aaronrdavis/mycelium-api/internal/llamaserver"
 	"github.com/aaronrdavis/mycelium-api/internal/node"
+	"github.com/aaronrdavis/mycelium-api/internal/queue"
 	"github.com/aaronrdavis/mycelium-api/internal/rpc"
 	"github.com/aaronrdavis/mycelium-api/internal/routing"
 )
 
 // Server is the Mycelium API HTTP server.
 type Server struct {
-	Config  *config.Config
-	Router  *routing.Router
-	Manager *node.Manager
+	Config       *config.Config
+	Router       *routing.Router
+	Manager      *node.Manager
+	LlamaManager *llamaserver.Manager
+	QueueManager *queue.Manager
 }
 
 // NewServer creates an API server.
-func NewServer(cfg *config.Config, router *routing.Router, mgr *node.Manager) *Server {
+func NewServer(cfg *config.Config, router *routing.Router, mgr *node.Manager, lm *llamaserver.Manager, qm *queue.Manager) *Server {
 	return &Server{
-		Config:  cfg,
-		Router:  router,
-		Manager: mgr,
+		Config:       cfg,
+		Router:       router,
+		Manager:      mgr,
+		LlamaManager: lm,
+		QueueManager: qm,
 	}
 }
 
@@ -136,6 +142,11 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/routes", s.handleRoutes)
 	mux.HandleFunc("/api/rpc/probe", s.handleRPCProbe)
 
+	// Async job queue (Muninn — deep, slow, background)
+	mux.HandleFunc("/api/submit", s.handleSubmit)
+	mux.HandleFunc("/api/job/", s.handleGetJob)
+	mux.HandleFunc("/api/jobs", s.handleListJobs)
+
 	mux.HandleFunc("/", s.handleRoot)
 }
 
@@ -159,6 +170,13 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	if req.Model == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "model is required"})
+		return
+	}
+
+	// If llama-server is healthy, route directly to it (RPC-distributed inference)
+	if s.LlamaManager != nil && s.LlamaManager.IsHealthy() {
+		log.Printf("[api] generate: %s -> llama-server (RPC distributed)", profileOrDefault(req.Profile))
+		s.proxyToLlamaServer(w, r, body, req)
 		return
 	}
 
@@ -279,6 +297,81 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// proxyToLlamaServer translates Ollama /api/generate format to llama-server's
+// /completion endpoint, proxies the request, and translates the response back.
+func (s *Server) proxyToLlamaServer(w http.ResponseWriter, r *http.Request, body []byte, req GenerateRequest) {
+	// Build llama-server completion request
+	completionReq := map[string]interface{}{
+		"prompt":      req.Prompt,
+		"n_predict":   128,
+		"temperature": 0.8,
+		"stream":      false,
+	}
+
+	completionBody, _ := json.Marshal(completionReq)
+	targetURL := fmt.Sprintf("%s/completion", s.LlamaManager.BaseURL())
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	proxyReq, err := http.NewRequest("POST", targetURL, bytes.NewReader(completionBody))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, ErrorResponse{Error: fmt.Sprintf("proxy error: %v", err)})
+		return
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		log.Printf("[api] proxy to llama-server failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, ErrorResponse{Error: fmt.Sprintf("llama-server error: %v", err)})
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, ErrorResponse{Error: "failed to read llama-server response"})
+		return
+	}
+
+	// Parse llama-server response and translate to Ollama format
+	var llmResp struct {
+		Content string `json:"content"`
+		Timings struct {
+			PredictedPerSecond float64 `json:"predicted_per_second"`
+			PredictedMS         float64 `json:"predicted_ms"`
+			PredictedTokens     int     `json:"predicted_n"`
+			PromptMS            float64 `json:"prompt_ms"`
+			PromptTokens        int     `json:"prompt_n"`
+		} `json:"timings"`
+		Stop bool `json:"stop"`
+	}
+
+	if err := json.Unmarshal(respBody, &llmResp); err != nil {
+		// Return raw response if we can't parse
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Mycelium-Profile", "llama-server-rpc")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	// Build Ollama-compatible response
+	ollamaResp := GenerateResponse{
+		Model:     req.Model,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Response:  llmResp.Content,
+		Done:      true,
+		Profile:   "llama-server-rpc",
+		Node:      "distributed",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Mycelium-Profile", "llama-server-rpc")
+	w.Header().Set("X-Mycelium-Node", "distributed")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(ollamaResp)
+}
+
 func (s *Server) routeToNode(w http.ResponseWriter, r *http.Request, result *routing.RouteResult, body []byte) {
 	targetNode := result.Node
 
@@ -295,8 +388,16 @@ func (s *Server) routeToNode(w http.ResponseWriter, r *http.Request, result *rou
 		return
 	}
 
-	// RPC-only node: use local Ollama as the inference frontend
-	// Ollama on Hearth handles model loading, RPC nodes handle compute offload
+	// RPC-only node: use llama-server as the inference frontend
+	// llama-server on Hearth handles model loading, RPC nodes handle compute offload
+	if s.LlamaManager != nil && s.LlamaManager.IsHealthy() {
+		// Proxy to llama-server's OpenAI-compatible API
+		targetURL := fmt.Sprintf("%s%s", s.LlamaManager.BaseURL(), r.URL.Path)
+		s.proxyToURL(w, r, targetURL, proxiedBody, result)
+		return
+	}
+
+	// Fallback: use local Ollama
 	fallbackAddr := s.Config.Routing.FallbackLocal
 	targetURL := fmt.Sprintf("http://%s%s", fallbackAddr, r.URL.Path)
 	s.proxyToURL(w, r, targetURL, proxiedBody, result)
@@ -381,6 +482,96 @@ func profileOrDefault(p string) string {
 	return "auto"
 }
 
+
+// handleSubmit accepts an async inference job.
+// POST /api/submit with {"model":"...", "prompt":"...", "profile":"muninn"}
+// Returns the job immediately with status "queued".
+func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	if s.QueueManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "async queue not enabled"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "failed to read request"})
+		return
+	}
+
+	var req queue.SubmitRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+
+	if req.Prompt == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "prompt is required"})
+		return
+	}
+
+	if req.Model == "" {
+		req.Model = "default"
+	}
+
+	job := s.QueueManager.Submit(req)
+	log.Printf("[api] submit: %s (model=%s)", job.ID, job.Model)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+// handleGetJob retrieves a job by ID.
+// GET /api/job/<id>
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	if s.QueueManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "async queue not enabled"})
+		return
+	}
+
+	// Extract job ID from path: /api/job/<id>
+	jobID := r.URL.Path[len("/api/job/"):]
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "job ID required"})
+		return
+	}
+
+	job, ok := s.QueueManager.GetJob(jobID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "job not found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, job)
+}
+
+// handleListJobs lists all jobs.
+// GET /api/jobs
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	if s.QueueManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "async queue not enabled"})
+		return
+	}
+
+	jobs := s.QueueManager.ListJobs()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"jobs":       jobs,
+		"queue_depth": s.QueueManager.QueueDepth(),
+		"total":       len(jobs),
+	})
+}
 
 // handleRPCProbe probes all RPC nodes and returns their device memory info.
 func (s *Server) handleRPCProbe(w http.ResponseWriter, r *http.Request) {
