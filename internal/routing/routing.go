@@ -117,6 +117,54 @@ func (r *Router) Route(model string, stream bool, contextLength int) (*RouteResu
 	}, nil
 }
 
+// RouteHedged classifies a request and selects multiple nodes for hedged routing.
+// Returns up to maxHedge nodes, ordered best-first, plus the routing profile and model.
+func (r *Router) RouteHedged(model string, stream bool, contextLength int, maxHedge int) (*RouteHedgedResult, error) {
+	profile := r.Classify(model, stream, contextLength)
+
+	var rule config.RouteRule
+	switch profile {
+	case ProfileHuginn:
+		rule = r.Config.Routing.Huginn
+	case ProfileMuninn:
+		rule = r.Config.Routing.Muninn
+	case ProfileSkald:
+		rule = r.Config.Routing.Skald
+	default:
+		rule = r.Config.Routing.Huginn
+	}
+
+	resolvedModel := model
+	if rule.Model != "" {
+		resolvedModel = rule.Model
+	}
+
+	nodes, err := r.Manager.SelectNodes(rule.Pools, maxHedge)
+	if err != nil {
+		// Try fallback pools
+		fallbackPools := r.fallbackPools(profile)
+		nodes, err = r.Manager.SelectNodes(fallbackPools, maxHedge)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &RouteHedgedResult{
+		Profile: profile,
+		Rule:    rule,
+		Nodes:   nodes,
+		Model:   resolvedModel,
+	}, nil
+}
+
+// RouteHedgedResult contains multiple node candidates for hedged routing.
+type RouteHedgedResult struct {
+	Profile Profile
+	Rule    config.RouteRule
+	Nodes   []*node.Node
+	Model   string
+}
+
 func (r *Router) fallbackPools(p Profile) []string {
 	switch p {
 	case ProfileHuginn:

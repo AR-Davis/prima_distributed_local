@@ -110,6 +110,52 @@ func (m *Manager) SelectNode(poolNames []string) (*Node, error) {
 	return nil, fmt.Errorf("no healthy nodes in pools: %v", poolNames)
 }
 
+// SelectNodes picks up to maxNodes healthy nodes from the specified pools,
+// ordered by score (best first). Used for hedged requests.
+func (m *Manager) SelectNodes(poolNames []string, maxNodes int) ([]*Node, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var allHealthy []*Node
+	seen := make(map[string]bool)
+
+	for _, poolName := range poolNames {
+		pool, ok := m.pools[poolName]
+		if !ok || len(pool) == 0 {
+			continue
+		}
+
+		for _, n := range pool {
+			if seen[n.Config.Name] {
+				continue
+			}
+			if n.GetStatus() == StatusHealthy || n.GetStatus() == StatusUnknown {
+				allHealthy = append(allHealthy, n)
+				seen[n.Config.Name] = true
+			}
+		}
+	}
+
+	if len(allHealthy) == 0 {
+		return nil, fmt.Errorf("no healthy nodes in pools: %v", poolNames)
+	}
+
+	// Sort by score descending
+	for i := 0; i < len(allHealthy); i++ {
+		for j := i + 1; j < len(allHealthy); j++ {
+			if scoreNode(allHealthy[j]) > scoreNode(allHealthy[i]) {
+				allHealthy[i], allHealthy[j] = allHealthy[j], allHealthy[i]
+			}
+		}
+	}
+
+	if maxNodes > 0 && len(allHealthy) > maxNodes {
+		allHealthy = allHealthy[:maxNodes]
+	}
+
+	return allHealthy, nil
+}
+
 func scoreNode(n *Node) float64 {
 	latencyFactor := 1.0
 	lat := n.GetLatency()

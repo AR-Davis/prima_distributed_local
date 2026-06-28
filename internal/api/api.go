@@ -4,11 +4,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/aaronrdavis/mycelium-api/internal/config"
@@ -185,15 +187,30 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream := req.Stream != nil && *req.Stream
-	result, err := s.Router.Route(req.Model, stream, len(req.Prompt))
+
+	// Try hedged routing — send to multiple nodes, first response wins
+	hedgedResult, err := s.Router.RouteHedged(req.Model, stream, len(req.Prompt), 3)
 	if err != nil {
 		log.Printf("[api] All Mycelium nodes down, falling back to local Ollama: %v", err)
 		s.proxyToLocal(w, r, body)
 		return
 	}
 
-	log.Printf("[api] generate: %s -> %s -> %s (model: %s)", profileOrDefault(req.Profile), result.Profile, result.Node.Config.Name, result.Model)
-	s.routeToNode(w, r, result, body)
+	if len(hedgedResult.Nodes) == 1 {
+		// Single node — no hedging needed
+		result := &routing.RouteResult{
+			Profile: hedgedResult.Profile,
+			Rule:    hedgedResult.Rule,
+			Node:    hedgedResult.Nodes[0],
+			Model:   hedgedResult.Model,
+		}
+		log.Printf("[api] generate: %s -> %s -> %s (model: %s)", profileOrDefault(req.Profile), result.Profile, result.Node.Config.Name, result.Model)
+		s.routeToNode(w, r, result, body)
+		return
+	}
+
+	log.Printf("[api] generate: %s -> %s (hedged, %d candidates, model: %s)", profileOrDefault(req.Profile), hedgedResult.Profile, len(hedgedResult.Nodes), hedgedResult.Model)
+	s.routeToNodeHedged(w, r, hedgedResult, body)
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -225,15 +242,28 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		contextLen += len(m.Content)
 	}
 
-	result, err := s.Router.Route(req.Model, stream, contextLen)
+	// Try hedged routing — send to multiple nodes, first response wins
+	hedgedResult, err := s.Router.RouteHedged(req.Model, stream, contextLen, 3)
 	if err != nil {
 		log.Printf("[api] All Mycelium nodes down, falling back to local Ollama: %v", err)
 		s.proxyToLocal(w, r, body)
 		return
 	}
 
-	log.Printf("[api] chat: %s -> %s -> %s (model: %s)", profileOrDefault(req.Profile), result.Profile, result.Node.Config.Name, result.Model)
-	s.routeToNode(w, r, result, body)
+	if len(hedgedResult.Nodes) == 1 {
+		result := &routing.RouteResult{
+			Profile: hedgedResult.Profile,
+			Rule:    hedgedResult.Rule,
+			Node:    hedgedResult.Nodes[0],
+			Model:   hedgedResult.Model,
+		}
+		log.Printf("[api] chat: %s -> %s -> %s (model: %s)", profileOrDefault(req.Profile), result.Profile, result.Node.Config.Name, result.Model)
+		s.routeToNode(w, r, result, body)
+		return
+	}
+
+	log.Printf("[api] chat: %s -> %s (hedged, %d candidates, model: %s)", profileOrDefault(req.Profile), hedgedResult.Profile, len(hedgedResult.Nodes), hedgedResult.Model)
+	s.routeToNodeHedged(w, r, hedgedResult, body)
 }
 
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +517,190 @@ func profileOrDefault(p string) string {
 		return p
 	}
 	return "auto"
+}
+
+// hedgeResponse captures a single node's proxy response for hedged routing.
+type hedgeResponse struct {
+	NodeName string
+	Profile  routing.Profile
+	Model    string
+	Status   int
+	Headers  http.Header
+	Body     []byte
+	Latency  time.Duration
+	Error    error
+}
+
+// routeToNodeHedged sends the request to multiple nodes with a delayed-hedge
+// strategy. The primary node fires immediately. If no response arrives within
+// hedgeDelay, a second request fires to the next node, and so on.
+// First successful response wins; remaining in-flight requests are cancelled.
+// Adapted from SynapticLlamas' HedgingStrategy (delayed-hedge variant).
+func (s *Server) routeToNodeHedged(w http.ResponseWriter, r *http.Request, result *routing.RouteHedgedResult, body []byte) {
+	nodes := result.Nodes
+	if len(nodes) == 0 {
+		s.proxyToLocal(w, r, body)
+		return
+	}
+
+	// If only one node, no hedging needed
+	if len(nodes) == 1 {
+		singleResult := &routing.RouteResult{
+			Profile: result.Profile,
+			Rule:    result.Rule,
+			Node:    nodes[0],
+			Model:   result.Model,
+		}
+		s.routeToNode(w, r, singleResult, body)
+		return
+	}
+
+	hedgeDelay := 300 * time.Millisecond
+	maxNodes := len(nodes)
+	if maxNodes > 3 {
+		maxNodes = 3 // Cap at 3 hedge nodes
+	}
+	nodes = nodes[:maxNodes]
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	resultsCh := make(chan hedgeResponse, maxNodes)
+	var wg sync.WaitGroup
+
+	for i, n := range nodes {
+		wg.Add(1)
+		go func(idx int, node *node.Node) {
+			defer wg.Done()
+
+			// Stagger: primary fires immediately, each subsequent after hedgeDelay
+			if idx > 0 {
+				select {
+				case <-time.After(hedgeDelay):
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			// Check if a winner already emerged
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Build the proxy URL for this node
+			proxiedBody := body
+			if result.Model != "" {
+				proxiedBody = overrideModel(body, result.Model)
+			}
+
+			targetURL := s.nodeProxyURL(node, r.URL.Path)
+			if targetURL == "" {
+				// Can't route to this node, skip
+				return
+			}
+
+			start := time.Now()
+			hr := hedgeResponse{
+				NodeName: node.GetName(),
+				Profile:  result.Profile,
+				Model:    result.Model,
+			}
+
+			client := &http.Client{Timeout: 300 * time.Second}
+			proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(proxiedBody))
+			if err != nil {
+				hr.Error = err
+				hr.Latency = time.Since(start)
+				resultsCh <- hr
+				return
+			}
+
+			for k, vv := range r.Header {
+				for _, v := range vv {
+					proxyReq.Header.Add(k, v)
+				}
+			}
+
+			resp, err := client.Do(proxyReq)
+			if err != nil {
+				hr.Error = err
+				hr.Latency = time.Since(start)
+				resultsCh <- hr
+				return
+			}
+			defer resp.Body.Close()
+
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				hr.Error = err
+				hr.Latency = time.Since(start)
+				resultsCh <- hr
+				return
+			}
+
+			hr.Status = resp.StatusCode
+			hr.Headers = resp.Header
+			hr.Body = respBody
+			hr.Latency = time.Since(start)
+			resultsCh <- hr
+		}(i, n)
+	}
+
+	// Wait for first successful response
+	var winner *hedgeResponse
+	var errors []hedgeResponse
+	for i := 0; i < maxNodes; i++ {
+		hr := <-resultsCh
+		if hr.Error == nil && hr.Status >= 200 && hr.Status < 400 {
+			winner = &hr
+			cancel() // Cancel all in-flight losers
+			break
+		}
+		errors = append(errors, hr)
+	}
+
+	// Drain remaining results (cancelled nodes)
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	if winner != nil {
+		log.Printf("[api] hedged: winner=%s (%s latency), profile=%s, model=%s, cancelled=%d",
+			winner.NodeName, winner.Latency.Round(time.Millisecond), winner.Profile, winner.Model, len(errors))
+		// Write winner response
+		for k, vv := range winner.Headers {
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("X-Mycelium-Profile", string(winner.Profile))
+		w.Header().Set("X-Mycelium-Node", winner.NodeName)
+		w.Header().Set("X-Mycelium-Model", winner.Model)
+		w.Header().Set("X-Mycelium-Hedged", "true")
+		w.WriteHeader(winner.Status)
+		w.Write(winner.Body)
+		return
+	}
+
+	// All nodes failed
+	log.Printf("[api] hedged: all %d nodes failed, falling back to local Ollama", len(errors))
+	s.proxyToLocal(w, r, body)
+}
+
+// nodeProxyURL returns the proxy URL for a given node, or empty string if
+// the node can't be proxied to directly.
+func (s *Server) nodeProxyURL(n *node.Node, path string) string {
+	if n.Config.APIPort > 0 {
+		return fmt.Sprintf("http://%s:%d%s", n.Config.Host, n.Config.APIPort, path)
+	}
+	// RPC-only node: use llama-server
+	if s.LlamaManager != nil && s.LlamaManager.IsHealthy() {
+		return fmt.Sprintf("%s%s", s.LlamaManager.BaseURL(), path)
+	}
+	// Fallback to local Ollama
+	fallbackAddr := s.Config.Routing.FallbackLocal
+	return fmt.Sprintf("http://%s%s", fallbackAddr, path)
 }
 
 
