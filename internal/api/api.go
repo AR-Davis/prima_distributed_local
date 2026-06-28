@@ -125,6 +125,8 @@ type NodeStatus struct {
 	GPUVerified bool   `json:"gpu_verified,omitempty"`
 	GPUOnCPU    bool   `json:"gpu_on_cpu,omitempty"`
 	GPUModel    string `json:"gpu_model,omitempty"`
+	FailCount   int    `json:"fail_count,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
 }
 
 type RoutingStatus struct {
@@ -298,6 +300,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			GPUVerified: n.GetGPUVerified(),
 			GPUOnCPU:    n.GetGPUOnCPU(),
 			GPUModel:    n.GetGPUModel(),
+			FailCount:   n.GetFailCount(),
+			LastError:   n.GetLastError(),
 		}
 	}
 
@@ -421,7 +425,11 @@ func (s *Server) routeToNode(w http.ResponseWriter, r *http.Request, result *rou
 	// If the node has an Ollama API port, proxy directly
 	if targetNode.Config.APIPort > 0 {
 		targetURL := fmt.Sprintf("http://%s:%d%s", targetNode.Config.Host, targetNode.Config.APIPort, r.URL.Path)
-		s.proxyToURL(w, r, targetURL, proxiedBody, result)
+		if s.proxyToURLWithRetry(w, r, targetURL, proxiedBody, result, targetNode) {
+			return // Success or error already written
+		}
+		// Failed — try fallback
+		s.proxyToLocal(w, r, proxiedBody)
 		return
 	}
 
@@ -430,7 +438,11 @@ func (s *Server) routeToNode(w http.ResponseWriter, r *http.Request, result *rou
 	if s.LlamaManager != nil && s.LlamaManager.IsHealthy() {
 		// Proxy to llama-server's OpenAI-compatible API
 		targetURL := fmt.Sprintf("%s%s", s.LlamaManager.BaseURL(), r.URL.Path)
-		s.proxyToURL(w, r, targetURL, proxiedBody, result)
+		if s.proxyToURLWithRetry(w, r, targetURL, proxiedBody, result, targetNode) {
+			return
+		}
+		// Failed — try fallback
+		s.proxyToLocal(w, r, proxiedBody)
 		return
 	}
 
@@ -438,6 +450,83 @@ func (s *Server) routeToNode(w http.ResponseWriter, r *http.Request, result *rou
 	fallbackAddr := s.Config.Routing.FallbackLocal
 	targetURL := fmt.Sprintf("http://%s%s", fallbackAddr, r.URL.Path)
 	s.proxyToURL(w, r, targetURL, proxiedBody, result)
+}
+
+// proxyToURLWithRetry proxies a request to the target URL. On success, it
+// records the success on the node and returns true. On failure, it records
+// the failure on the node and returns false (caller should try fallback).
+// If the node has already exceeded MaxFailures, it's skipped immediately.
+func (s *Server) proxyToURLWithRetry(w http.ResponseWriter, r *http.Request, targetURL string, body []byte, routeInfo *routing.RouteResult, targetNode *node.Node) bool {
+	// Skip node if it's already auto-marked unhealthy from failures
+	if targetNode.GetFailCount() >= node.MaxFailures {
+		log.Printf("[api] skipping %s (fail_count=%d >= %d)", targetNode.GetName(), targetNode.GetFailCount(), node.MaxFailures)
+		return false
+	}
+
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	} else if r.Body != nil {
+		reqBody = r.Body
+	}
+
+	proxyReq, err := http.NewRequest(r.Method, targetURL, reqBody)
+	if err != nil {
+		log.Printf("[api] proxy request creation failed: %v", err)
+		targetNode.RecordFailure(fmt.Sprintf("proxy creation: %v", err))
+		return false
+	}
+
+	for k, vv := range r.Header {
+		for _, v := range vv {
+			proxyReq.Header.Add(k, v)
+		}
+	}
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		log.Printf("[api] proxy to %s failed: %v", targetURL, err)
+		targetNode.RecordFailure(err.Error())
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Non-2xx/3xx is a failure
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(resp.Body)
+		errMsg := fmt.Sprintf("HTTP %d from %s: %s", resp.StatusCode, targetURL, string(errBody[:clamp(len(errBody), 200)]))
+		log.Printf("[api] upstream error: %s", errMsg)
+		targetNode.RecordFailure(errMsg)
+		writeJSON(w, resp.StatusCode, ErrorResponse{Error: errMsg})
+		return true // We wrote a response, but it's an error — don't retry
+	}
+
+	// Success — record it
+	targetNode.RecordSuccess()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+
+	if routeInfo != nil {
+		w.Header().Set("X-Mycelium-Profile", string(routeInfo.Profile))
+		w.Header().Set("X-Mycelium-Node", routeInfo.Node.Config.Name)
+		w.Header().Set("X-Mycelium-Model", routeInfo.Model)
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+	return true
+}
+
+func clamp(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // overrideModel rewrites the "model" field in a JSON request body.
@@ -657,6 +746,17 @@ func (s *Server) routeToNodeHedged(w http.ResponseWriter, r *http.Request, resul
 			break
 		}
 		errors = append(errors, hr)
+		// Record failure on the losing node
+		for _, n := range nodes {
+			if n.GetName() == hr.NodeName {
+				if hr.Error != nil {
+					n.RecordFailure(hr.Error.Error())
+				} else {
+					n.RecordFailure(fmt.Sprintf("HTTP %d", hr.Status))
+				}
+				break
+			}
+		}
 	}
 
 	// Drain remaining results (cancelled nodes)
@@ -666,6 +766,13 @@ func (s *Server) routeToNodeHedged(w http.ResponseWriter, r *http.Request, resul
 	}()
 
 	if winner != nil {
+		// Record success on the winning node
+		for _, n := range nodes {
+			if n.GetName() == winner.NodeName {
+				n.RecordSuccess()
+				break
+			}
+		}
 		log.Printf("[api] hedged: winner=%s (%s latency), profile=%s, model=%s, cancelled=%d",
 			winner.NodeName, winner.Latency.Round(time.Millisecond), winner.Profile, winner.Model, len(errors))
 		// Write winner response

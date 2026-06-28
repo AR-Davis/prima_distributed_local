@@ -40,9 +40,16 @@ type Node struct {
 	GPUVerified bool   // True if last VerifyGPU confirmed model in VRAM
 	GPUModel   string // Model name from last GPU verification
 	GPUOnCPU   bool   // True if model silently fell back to CPU
+	FailCount  int    // Consecutive failures since last success
+	LastFailure time.Time // When the last failure occurred
+	LastError   string // Last error message
 	rpcPool    *rpc.NodePool // Shared RPC pool for device queries
 	mu         sync.RWMutex
 }
+
+// MaxFailures is the number of consecutive failures before a node is
+// automatically marked unhealthy and removed from routing.
+const MaxFailures = 3
 
 // Manager tracks all nodes and their health.
 type Manager struct {
@@ -230,6 +237,11 @@ func (n *Node) rpcHealthCheck() error {
 	n.Latency = latency
 	n.FreeMem = mem.Free
 	n.TotalMem = mem.Total
+	if n.FailCount > 0 {
+		log.Printf("[node] %s recovered after %d failures (health check)", n.Config.Name, n.FailCount)
+	}
+	n.FailCount = 0
+	n.LastError = ""
 	n.mu.Unlock()
 	
 	log.Printf("[node] %s healthy (rpc, %s, mem: %s/%s, latency: %s)",
@@ -262,7 +274,13 @@ func (n *Node) tcpHealthCheck() error {
 
 	n.Status = StatusHealthy
 	n.Latency = latency
+	if n.FailCount > 0 {
+		log.Printf("[node] %s recovered after %d failures (health check)", n.Config.Name, n.FailCount)
+	}
+	n.FailCount = 0
+	n.LastError = ""
 	n.mu.Unlock()
+	
 	log.Printf("[node] %s healthy (%s, %s latency)", n.Config.Name, n.Config.Type, latency.Round(time.Millisecond))
 	return nil
 }
@@ -505,4 +523,56 @@ func (n *Node) GetGPUModel() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.GPUModel
+}
+
+// RecordFailure increments the consecutive failure count and marks the node
+// unhealthy if it exceeds MaxFailures. Called when a routed request fails.
+func (n *Node) RecordFailure(err string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.FailCount++
+	n.LastFailure = time.Now()
+	n.LastError = err
+
+	if n.FailCount >= MaxFailures {
+		n.Status = StatusUnhealthy
+		log.Printf("[node] %s auto-marked unhealthy after %d consecutive failures (last: %s)",
+			n.Config.Name, n.FailCount, err)
+	} else {
+		log.Printf("[node] %s failure %d/%d: %s", n.Config.Name, n.FailCount, MaxFailures, err)
+	}
+}
+
+// RecordSuccess resets the failure count. Called when a routed request succeeds.
+func (n *Node) RecordSuccess() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.FailCount > 0 {
+		log.Printf("[node] %s recovered after %d failures", n.Config.Name, n.FailCount)
+	}
+	n.FailCount = 0
+	n.LastError = ""
+}
+
+// GetFailCount returns the current consecutive failure count.
+func (n *Node) GetFailCount() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.FailCount
+}
+
+// GetLastFailure returns the time of the last failure.
+func (n *Node) GetLastFailure() time.Time {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.LastFailure
+}
+
+// GetLastError returns the last error message.
+func (n *Node) GetLastError() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.LastError
 }
