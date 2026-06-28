@@ -2,13 +2,18 @@
 // pool membership, and load-weighted selection.
 // For RPC-type nodes, the health check queries device memory via
 // the ggml-rpc binary protocol instead of just TCP dialing.
+// For Ollama-type GPU nodes, VerifyGPU polls /api/ps to confirm
+// models are loaded in VRAM, not silently fallen back to CPU.
 package node
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -27,13 +32,16 @@ const (
 
 // Node tracks a single inference node's state.
 type Node struct {
-	Config   config.NodeConfig
-	Status   Status
-	Latency  time.Duration
-	FreeMem  uint64 // Free device memory (bytes) - from RPC probe
-	TotalMem uint64 // Total device memory (bytes) - from RPC probe
-	rpcPool  *rpc.NodePool // Shared RPC pool for device queries
-	mu       sync.RWMutex
+	Config     config.NodeConfig
+	Status     Status
+	Latency   time.Duration
+	FreeMem   uint64 // Free device memory (bytes) - from RPC probe
+	TotalMem  uint64 // Total device memory (bytes) - from RPC probe
+	GPUVerified bool   // True if last VerifyGPU confirmed model in VRAM
+	GPUModel   string // Model name from last GPU verification
+	GPUOnCPU   bool   // True if model silently fell back to CPU
+	rpcPool    *rpc.NodePool // Shared RPC pool for device queries
+	mu         sync.RWMutex
 }
 
 // Manager tracks all nodes and their health.
@@ -124,12 +132,20 @@ func (m *Manager) AllNodes() []*Node {
 
 // HealthCheck probes a single node.
 // For RPC-type nodes, it queries the ggml-rpc server for device memory.
-// For Ollama-type nodes, it does a simple TCP dial to the API port.
+// For Ollama-type nodes, it does a TCP dial to the API port,
+// then for GPU nodes, runs VerifyGPU to check VRAM placement.
 func (n *Node) HealthCheck(ctx context.Context) error {
 	if n.Config.Protocol == config.ProtocolRPC {
 		return n.rpcHealthCheck()
 	}
-	return n.tcpHealthCheck()
+	if err := n.tcpHealthCheck(); err != nil {
+		return err
+	}
+	// For GPU-type Ollama nodes, verify models are actually in VRAM
+	if n.Config.Type == config.NodeTypeGPU && n.GetStatus() == StatusHealthy {
+		_ = n.VerifyGPU()
+	}
+	return nil
 }
 
 // rpcHealthCheck queries the RPC server for device memory info.
@@ -203,6 +219,141 @@ func (n *Node) tcpHealthCheck() error {
 	n.mu.Unlock()
 	log.Printf("[node] %s healthy (%s, %s latency)", n.Config.Name, n.Config.Type, latency.Round(time.Millisecond))
 	return nil
+}
+
+// VerifyGPU polls the Ollama /api/ps endpoint to confirm that loaded models
+// are actually in VRAM (GPU), not silently fallen back to CPU RAM.
+// This catches the "routed to GPU, runs on CPU" bug from SynapticLlamas.
+// Only meaningful for Ollama-protocol nodes with type "gpu".
+func (n *Node) VerifyGPU() error {
+	if n.Config.Protocol != config.ProtocolOllama {
+		return nil // Only applies to Ollama nodes
+	}
+
+	apiPort := n.Config.APIPort
+	if apiPort == 0 {
+		apiPort = 11434 // Default Ollama port
+	}
+
+	url := fmt.Sprintf("http://%s:%d/api/ps", n.Config.Host, apiPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		n.mu.Lock()
+		n.GPUVerified = false
+		n.GPUOnCPU = false
+		n.mu.Unlock()
+		log.Printf("[gpu-verify] %s: failed to query /api/ps: %v", n.Config.Name, err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	var psResp struct {
+		Models []struct {
+			Name     string `json:"name"`
+			SizeVRAM int64  `json:"size_vram"`
+			Size     int64  `json:"size"`
+		} `json:"models"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&psResp); err != nil {
+		log.Printf("[gpu-verify] %s: failed to parse /api/ps response: %v", n.Config.Name, err)
+		return err
+	}
+
+	if len(psResp.Models) == 0 {
+		n.mu.Lock()
+		n.GPUVerified = false
+		n.GPUOnCPU = false
+		n.GPUModel = ""
+		n.mu.Unlock()
+		log.Printf("[gpu-verify] %s: no models loaded", n.Config.Name)
+		return nil
+	}
+
+	// Check each loaded model: if size_vram > 0, it's on GPU
+	allOnGPU := true
+	var modelsOnCPU []string
+	var primaryModel string
+
+	for i, m := range psResp.Models {
+		if i == 0 {
+			primaryModel = m.Name
+		}
+		if m.SizeVRAM == 0 {
+			allOnGPU = false
+			modelsOnCPU = append(modelsOnCPU, m.Name)
+		}
+	}
+
+	n.mu.Lock()
+	n.GPUModel = primaryModel
+	if allOnGPU {
+		n.GPUVerified = true
+		n.GPUOnCPU = false
+		n.mu.Unlock()
+		log.Printf("[gpu-verify] %s: ✅ models on GPU (VRAM confirmed)", n.Config.Name)
+	} else {
+		n.GPUVerified = false
+		n.GPUOnCPU = true
+		n.mu.Unlock()
+		log.Printf("[gpu-verify] ⚠️  %s: models on CPU (not VRAM): %v — size_vram=0 for %d model(s)",
+			n.Config.Name, modelsOnCPU, len(modelsOnCPU))
+	}
+	return nil
+}
+
+// ForceGPUReload attempts to force a model back onto GPU by unloading
+// and reloading with num_gpu: -1. Adapted from SynapticLlamas gpu_controller.
+func (n *Node) ForceGPUReload(modelName string) error {
+	if n.Config.Protocol != config.ProtocolOllama {
+		return fmt.Errorf("force reload only supported for Ollama nodes")
+	}
+
+	apiPort := n.Config.APIPort
+	if apiPort == 0 {
+		apiPort = 11434
+	}
+	baseURL := fmt.Sprintf("http://%s:%d", n.Config.Host, apiPort)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Step 1: Unload the model
+	unloadReq := map[string]interface{}{
+		"model":      modelName,
+		"keep_alive": 0,
+	}
+	unloadBody, _ := json.Marshal(unloadReq)
+	unloadURL := fmt.Sprintf("%s/api/generate", baseURL)
+	resp, err := client.Post(unloadURL, "application/json", bytes.NewReader(unloadBody))
+	if err != nil {
+		return fmt.Errorf("unload failed: %w", err)
+	}
+	resp.Body.Close()
+
+	time.Sleep(2 * time.Second)
+
+	// Step 2: Reload with num_gpu: -1 (force all layers on GPU)
+	reloadReq := map[string]interface{}{
+		"model":      modelName,
+		"prompt":     "",
+		"keep_alive": "1h",
+		"options": map[string]interface{}{
+			"num_gpu": -1,
+		},
+	}
+	reloadBody, _ := json.Marshal(reloadReq)
+	reloadURL := fmt.Sprintf("%s/api/generate", baseURL)
+	resp, err = client.Post(reloadURL, "application/json", bytes.NewReader(reloadBody))
+	if err != nil {
+		return fmt.Errorf("reload failed: %w", err)
+	}
+	resp.Body.Close()
+
+	time.Sleep(2 * time.Second)
+
+	// Step 3: Re-verify
+	return n.VerifyGPU()
 }
 
 // StartHealthChecks runs periodic health checks on all nodes.
@@ -287,4 +438,25 @@ func (n *Node) GetWeight() int { return n.Config.Weight }
 // GetRPCAddr returns the node's RPC address (host:port).
 func (n *Node) GetRPCAddr() string {
 	return fmt.Sprintf("%s:%d", n.Config.Host, n.Config.Port)
+}
+
+// GetGPUVerified returns whether the last VerifyGPU confirmed VRAM usage.
+func (n *Node) GetGPUVerified() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.GPUVerified
+}
+
+// GetGPUOnCPU returns true if a model was detected on CPU instead of GPU.
+func (n *Node) GetGPUOnCPU() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.GPUOnCPU
+}
+
+// GetGPUModel returns the model name from the last GPU verification.
+func (n *Node) GetGPUModel() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.GPUModel
 }

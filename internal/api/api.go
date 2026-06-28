@@ -112,14 +112,17 @@ type StatusResponse struct {
 }
 
 type NodeStatus struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Status   string `json:"status"`
-	Latency  string `json:"latency"`
-	Pool     string `json:"pool"`
-	Protocol string `json:"protocol,omitempty"`
-	FreeMem  string `json:"free_mem,omitempty"`
-	TotalMem string `json:"total_mem,omitempty"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Latency     string `json:"latency"`
+	Pool        string `json:"pool"`
+	Protocol    string `json:"protocol,omitempty"`
+	FreeMem     string `json:"free_mem,omitempty"`
+	TotalMem    string `json:"total_mem,omitempty"`
+	GPUVerified bool   `json:"gpu_verified,omitempty"`
+	GPUOnCPU    bool   `json:"gpu_on_cpu,omitempty"`
+	GPUModel    string `json:"gpu_model,omitempty"`
 }
 
 type RoutingStatus struct {
@@ -141,6 +144,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/routes", s.handleRoutes)
 	mux.HandleFunc("/api/rpc/probe", s.handleRPCProbe)
+	mux.HandleFunc("/api/gpu-check", s.handleGPUCheck)
 
 	// Async job queue (Muninn — deep, slow, background)
 	mux.HandleFunc("/api/submit", s.handleSubmit)
@@ -253,14 +257,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			latency = n.GetLatency().Round(time.Millisecond).String()
 		}
 		nodeStatuses[i] = NodeStatus{
-			Name:     n.GetName(),
-			Type:     string(n.GetType()),
-			Status:   string(n.GetStatus()),
-			Latency:  latency,
-			Pool:     n.GetPool(),
-			Protocol: string(n.Config.Protocol),
-			FreeMem:  rpc.FormatMemory(n.GetFreeMem()),
-			TotalMem: rpc.FormatMemory(n.GetTotalMem()),
+			Name:        n.GetName(),
+			Type:        string(n.GetType()),
+			Status:      string(n.GetStatus()),
+			Latency:     latency,
+			Pool:        n.GetPool(),
+			Protocol:    string(n.Config.Protocol),
+			FreeMem:     rpc.FormatMemory(n.GetFreeMem()),
+			TotalMem:    rpc.FormatMemory(n.GetTotalMem()),
+			GPUVerified: n.GetGPUVerified(),
+			GPUOnCPU:    n.GetGPUOnCPU(),
+			GPUModel:    n.GetGPUModel(),
 		}
 	}
 
@@ -636,5 +643,90 @@ func (s *Server) handleRPCProbe(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"rpc_nodes": results,
+	})
+}
+
+// handleGPUCheck runs GPU verification on all GPU-type nodes.
+// GET /api/gpu-check — verify all GPU nodes
+// GET /api/gpu-check?node=hearth — verify specific node
+// POST /api/gpu-check?node=hearth&force_reload=true&model=little-watts — force reload to GPU
+func (s *Server) handleGPUCheck(w http.ResponseWriter, r *http.Request) {
+	nodeName := r.URL.Query().Get("node")
+	forceReload := r.URL.Query().Get("force_reload") == "true"
+	modelName := r.URL.Query().Get("model")
+
+	type gpuCheckResult struct {
+		Node        string `json:"node"`
+		GPUVerified bool   `json:"gpu_verified"`
+		GPUOnCPU    bool   `json:"gpu_on_cpu"`
+		GPUModel    string `json:"gpu_model,omitempty"`
+		Action      string `json:"action,omitempty"`
+		Error       string `json:"error,omitempty"`
+	}
+
+	var results []gpuCheckResult
+
+	for _, n := range s.Manager.AllNodes() {
+		// Skip non-Ollama nodes
+		if n.Config.Protocol != config.ProtocolOllama {
+			continue
+		}
+		// Filter by node name if specified
+		if nodeName != "" && n.GetName() != nodeName {
+			continue
+		}
+		// Skip non-GPU nodes unless explicitly requested
+		if n.Config.Type != config.NodeTypeGPU && nodeName == "" {
+			continue
+		}
+
+		result := gpuCheckResult{Node: n.GetName()}
+
+		// Run verification
+		if err := n.VerifyGPU(); err != nil {
+			result.Error = err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		result.GPUVerified = n.GetGPUVerified()
+		result.GPUOnCPU = n.GetGPUOnCPU()
+		result.GPUModel = n.GetGPUModel()
+
+		// Force reload if requested and model is on CPU
+		if forceReload && n.GetGPUOnCPU() {
+			modelToReload := modelName
+			if modelToReload == "" {
+				modelToReload = n.GetGPUModel()
+			}
+			if modelToReload != "" {
+				log.Printf("[gpu-check] forcing reload of %s on %s (was on CPU)", modelToReload, n.GetName())
+				if err := n.ForceGPUReload(modelToReload); err != nil {
+					result.Action = fmt.Sprintf("force_reload_failed: %v", err)
+				} else {
+					result.GPUVerified = n.GetGPUVerified()
+					result.GPUOnCPU = n.GetGPUOnCPU()
+					if n.GetGPUVerified() {
+						result.Action = "force_reload_success"
+					} else {
+						result.Action = "force_reload_still_on_cpu"
+					}
+				}
+			}
+		}
+
+		results = append(results, result)
+	}
+
+	if len(results) == 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"gpu_nodes": []gpuCheckResult{},
+			"message":   "no GPU-type Ollama nodes found",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"gpu_nodes": results,
 	})
 }
