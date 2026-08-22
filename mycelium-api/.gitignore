@@ -1,7 +1,10 @@
 # Binaries
 mycelium-api
 mycelium-api.exe
+mycelium-api-*
 *.exe
+*.so
+*.dylib
 
 # Build artifacts
 dist/
