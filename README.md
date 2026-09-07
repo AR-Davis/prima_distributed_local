@@ -192,3 +192,13 @@ This project is part of the Prima.cpp ecosystem for distributed LLM inference on
 - [Prima.cpp](https://github.com/fengwenjiao/prima.cpp) - The underlying inference engine
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) - Foundation for local LLMs
 - [Go](https://golang.org/) - The language that makes portable tooling possible
+
+
+## Coven Mesh Integration — 2026-09-07
+
+This project is part of the Coven mesh alongside:
+
+- `mycelium-deploy` — bootstrap and deployment notes
+- `mycelium-slow-digest` — deliberation engine + digest dashboard
+
+Ember (192.168.100.50 / Tailscale `myceliumnetwork`) now runs `mycelium-rpc.service` on `0.0.0.0:50052` as a Hearth-Archive / tier-2 settler node.
