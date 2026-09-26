@@ -25,3 +25,6 @@ mycelium.local.yaml
 *.log
 gateway-*.log
 sandbox-gateway.log
+
+sandbox-*.log
+configs/*.sandbox.yaml

@@ -51,7 +51,10 @@ func (r *Router) Classify(model string, stream bool, contextLength int) Profile 
 		strings.Contains(lower, "small"),
 		strings.Contains(lower, "fast"),
 		strings.Contains(lower, "qwen2.5-3b"),
-		strings.Contains(lower, "qwen3.5"):
+		strings.Contains(lower, "qwen3.5"),
+		strings.Contains(lower, "llama3.2"),
+		strings.Contains(lower, "phi4-mini"),
+		strings.Contains(lower, "phi4_mini"):
 		return ProfileHuginn
 
 	case strings.Contains(lower, "glm-4"),

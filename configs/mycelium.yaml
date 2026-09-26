@@ -68,6 +68,26 @@ nodes:
     weight: 3
     timeout: 60s
 
+  # Crow: RPi Zero 2W (armhf) edge worker
+  - name: crow
+    host: "100.97.71.98"
+    port: 50052
+    type: cpu
+    protocol: rpc
+    pool: edge
+    weight: 2
+    timeout: 300s
+
+  # Wren: RPi Zero 2W (armhf) edge worker
+  - name: wren
+    host: "100.83.89.53"
+    port: 50052
+    type: cpu
+    protocol: rpc
+    pool: edge
+    weight: 2
+    timeout: 300s
+
 logging:
   level: "info"
   format: "text"
