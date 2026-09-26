@@ -1,0 +1,31 @@
+server:
+  host: 0.0.0.0
+  port: 11445
+routing:
+  huginn:
+    pools:
+    - local
+    timeout: 30s
+  muninn:
+    pools:
+    - remote
+    - edge
+    - local
+    timeout: 300s
+  skald:
+    pools:
+    - local
+    timeout: 30s
+  default: huginn
+  fallback_local: localhost:11434
+nodes:
+- name: hearth
+  host: localhost
+  api_port: 11434
+  type: gpu
+  protocol: ollama
+  pool: local
+  weight: 10
+logging:
+  level: info
+  format: text

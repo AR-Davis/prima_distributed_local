@@ -20,3 +20,8 @@ Thumbs.db
 
 # Config overrides (keep example configs in repo, ignore local overrides)
 mycelium.local.yaml
+
+# Gateway logs
+*.log
+gateway-*.log
+sandbox-gateway.log

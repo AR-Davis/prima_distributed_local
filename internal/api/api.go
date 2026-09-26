@@ -150,6 +150,11 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rpc/probe", s.handleRPCProbe)
 	mux.HandleFunc("/api/gpu-check", s.handleGPUCheck)
 
+	// OpenAI-compatible v1 shim: lets Hermes and other OpenAI clients use the gateway.
+	mux.HandleFunc("/v1/models", s.handleV1Proxy)
+	mux.HandleFunc("/v1/chat/completions", s.handleV1ChatCompletions)
+	mux.HandleFunc("/v1/completions", s.handleV1Completions)
+
 	// Async job queue (Muninn — deep, slow, background)
 	mux.HandleFunc("/api/submit", s.handleSubmit)
 	mux.HandleFunc("/api/job/", s.handleGetJob)
@@ -1051,3 +1056,129 @@ func (s *Server) handleGPUCheck(w http.ResponseWriter, r *http.Request) {
 		"gpu_nodes": results,
 	})
 }
+
+
+// --- OpenAI-compatible v1 shim ---
+
+type v1ChatCompletionRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+	Options  map[string]interface{} `json:"options,omitempty"`
+}
+
+func (s *Server) handleV1Proxy(w http.ResponseWriter, r *http.Request) {
+	// Ollama exposes /v1/models natively via its OpenAI compatibility layer.
+	fallbackAddr := s.Config.Routing.FallbackLocal
+	targetURL := fmt.Sprintf("http://%s%s", fallbackAddr, r.URL.Path)
+	s.proxyToURL(w, r, targetURL, nil, nil)
+}
+
+func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "failed to read request"})
+		return
+	}
+
+	var v1Req v1ChatCompletionRequest
+	if err := json.Unmarshal(body, &v1Req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+
+	if v1Req.Model == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "model is required"})
+		return
+	}
+
+	stream := v1Req.Stream
+	contextLen := 0
+	for _, m := range v1Req.Messages {
+		contextLen += len(m.Content)
+	}
+
+	result, err := s.Router.Route(v1Req.Model, stream, contextLen)
+	if err != nil {
+		log.Printf("[api/v1] All Mycelium nodes down, falling back to local Ollama: %v", err)
+		s.proxyToLocal(w, r, body)
+		return
+	}
+
+	log.Printf("[api/v1] chat: %s -> %s (model: %s)", result.Node.Config.Name, result.Profile, result.Model)
+
+	proxiedBody := body
+	if result.Model != "" {
+		proxiedBody = overrideModel(body, result.Model)
+	}
+
+	targetNode := result.Node
+	if targetNode.Config.APIPort > 0 {
+		targetURL := fmt.Sprintf("http://%s:%d%s", targetNode.Config.Host, targetNode.Config.APIPort, r.URL.Path)
+		s.proxyToURL(w, r, targetURL, proxiedBody, result)
+		return
+	}
+
+	fallbackAddr := s.Config.Routing.FallbackLocal
+	targetURL := fmt.Sprintf("http://%s%s", fallbackAddr, r.URL.Path)
+	s.proxyToURL(w, r, targetURL, proxiedBody, result)
+}
+
+func (s *Server) handleV1Completions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "failed to read request"})
+		return
+	}
+
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+
+	model, _ := req["model"].(string)
+	if model == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "model is required"})
+		return
+	}
+
+	streamVal, _ := req["stream"].(bool)
+	promptVal, _ := req["prompt"].(string)
+
+	result, err := s.Router.Route(model, streamVal, len(promptVal))
+	if err != nil {
+		log.Printf("[api/v1] All Mycelium nodes down, falling back to local Ollama: %v", err)
+		s.proxyToLocal(w, r, body)
+		return
+	}
+
+	log.Printf("[api/v1] completion: %s -> %s (model: %s)", result.Node.Config.Name, result.Profile, result.Model)
+
+	proxiedBody := body
+	if result.Model != "" {
+		proxiedBody = overrideModel(body, result.Model)
+	}
+
+	targetNode := result.Node
+	if targetNode.Config.APIPort > 0 {
+		targetURL := fmt.Sprintf("http://%s:%d%s", targetNode.Config.Host, targetNode.Config.APIPort, r.URL.Path)
+		s.proxyToURL(w, r, targetURL, proxiedBody, result)
+		return
+	}
+
+	fallbackAddr := s.Config.Routing.FallbackLocal
+	targetURL := fmt.Sprintf("http://%s%s", fallbackAddr, r.URL.Path)
+	s.proxyToURL(w, r, targetURL, proxiedBody, result)
+}
+
